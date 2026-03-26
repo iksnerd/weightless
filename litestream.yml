@@ -1,0 +1,9 @@
+# litestream.yml
+access-key-id: ${GCS_ACCESS_KEY}
+secret-access-key: ${GCS_SECRET_KEY}
+
+dbs:
+  - path: /data/weightless.db
+    replicas:
+      - url: s3://${BACKUP_BUCKET}/db
+        endpoint: https://storage.googleapis.com

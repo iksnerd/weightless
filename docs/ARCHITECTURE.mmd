@@ -1,0 +1,80 @@
+flowchart TD
+    %% --- LAYER 1: The Libraries (Shared Infrastructure) ---
+    subgraph Libs [1. SHARED LIBRARIES - Pure Go, Zero-CGO]
+        BTLIB[[BitTorrent v1+v2 Protocol - Create, Hash, Download]]:::lib
+        PROV[[Ed25519 Provenance - Identity, Sign, Verify]]:::planned
+    end
+
+    %% --- LAYER 2: The Clients (The Experience) ---
+    subgraph Clients [2. THE CLIENTS - Publishing and Fetching]
+        subgraph Publishing [Publishing Path]
+            CLI_P([wl create - CLI]):::client
+            WASM([WASM Module - Browser]):::planned
+        end
+
+        subgraph Fetching [Downloading Path]
+            CLI_F([wl get - CLI]):::planned
+            BT([Standard BT Clients - Transmission, qBittorrent]):::client
+        end
+    end
+
+    %% --- LAYER 3: The Infrastructure (The Engine) ---
+    subgraph Service [3. THE INFRASTRUCTURE - Tracker and Registry]
+        subgraph Control [Control Plane]
+            REG[/api/registry - Search and Register/]:::endpoint
+            AUTH_R{{HMAC-SHA256 Passkey Auth}}:::logic
+        end
+
+        subgraph DataPlane [Data Plane]
+            ANN[/announce/:passkey - Peer Discovery/]:::endpoint
+            AUTH_T{{HMAC Usage Auth}}:::logic
+            HYBRID{{v1+v2 Swarm Coordinator}}:::logic
+            STATE[(In-Memory Swarm State)]:::memory
+        end
+    end
+
+    %% --- LAYER 4: Persistence ---
+    subgraph Storage [4. PERSISTENCE - Storage and Sync]
+        DB[(SQLite DB - WAL Mode)]:::storage
+        LS[Litestream Sidecar]:::storage
+        GCS[(GCS Cloud Backup)]:::storage
+    end
+
+    %% --- THE FLOW ---
+
+    %% Stage 1: Publishing
+    Libs --> CLI_P
+    Libs -.-> WASM
+    CLI_P -- "Register Torrent" --> REG
+    WASM -. "Register Torrent" .-> REG
+    REG --> AUTH_R
+    AUTH_R --> DB
+
+    %% Stage 2: Discovery
+    REG -.->|"Search / Metadata"| CLI_F
+    REG -.->|"Magnet Link"| BT
+
+    %% Stage 3: Downloading & Swarm
+    CLI_F -. "Announce + BEP 9" .-> ANN
+    BT -- "Standard Announce" --> ANN
+    ANN --> AUTH_T
+    AUTH_T --> HYBRID
+    HYBRID --> STATE
+    STATE -- "Periodic Flush" --> DB
+
+    %% Persistence
+    DB -- "Stream WAL" --> LS
+    LS -- "Replicate" --> GCS
+
+    %% --- Legend ---
+    L1([Solid = Live]):::client
+    L2([Dashed = Grant-Funded]):::planned
+
+    %% --- Styling ---
+    classDef lib fill:#f59e0b,color:#fff,stroke:#b45309,stroke-width:2px;
+    classDef planned fill:#f59e0b,color:#fff,stroke:#b45309,stroke-width:2px,stroke-dasharray: 5 5;
+    classDef client fill:#2563eb,color:#fff,stroke:#1e3a8a,stroke-width:2px;
+    classDef endpoint fill:#f8fafc,color:#0f172a,stroke:#334155,stroke-dasharray: 5 5;
+    classDef logic fill:#f1f5f9,color:#1e293b,stroke:#94a3b8,stroke-width:2px;
+    classDef memory fill:#8b5cf6,color:#fff,stroke:#4c1d95,stroke-width:2px;
+    classDef storage fill:#10b981,color:#fff,stroke:#064e3b,stroke-width:2px;

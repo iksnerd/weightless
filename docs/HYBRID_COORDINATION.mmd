@@ -1,0 +1,75 @@
+flowchart TD
+    %% === STAGE 1: TORRENT CREATION ===
+    subgraph Create ["STAGE 1: wl create — Build Hybrid Torrent"]
+        direction LR
+        FILE[("Local File(s)")]:::artifact
+        V1H["SHA-1 Pieces<br/>v1 info_hash (20 bytes)"]:::v1
+        V2H["SHA-256 Merkle Tree<br/>v2 info_hash (32 bytes)"]:::v2
+        TOR[".torrent file<br/>source: your-source-tag"]:::artifact
+        MAG["Magnet Link<br/>btih + btmh"]:::artifact
+
+        FILE --> V1H
+        FILE --> V2H
+        V1H --> TOR
+        V2H --> TOR
+        TOR --> MAG
+    end
+
+    %% === STAGE 2: REGISTRATION ===
+    subgraph Register ["STAGE 2: Register — One Entry, Two Hashes"]
+        direction LR
+        REG[("Registry DB")]:::storage
+        ROW["info_hash = SHA-256 hex<br/>v1_info_hash = SHA-1 hex<br/>+ name, license, tags..."]:::logic
+
+        REG --- ROW
+    end
+
+    TOR -- "POST /api/registry" --> REG
+
+    %% === STAGE 3: ANNOUNCE — The Bridge ===
+    subgraph Announce ["STAGE 3: Announce — Any Client, Any Hash"]
+        direction TB
+
+        subgraph ClientTypes ["Clients send different hashes"]
+            direction LR
+            C1([Transmission 3.x<br/>sends 20-byte SHA-1]):::v1
+            C2([qBittorrent / Transmission 4.x<br/>sends 20 or 32 bytes]):::hybrid
+            C3([v2-only clients<br/>send 32-byte SHA-256]):::v2
+        end
+
+        ANN["/announce endpoint"]:::endpoint
+        STEP1["1. Accept 20-byte OR 32-byte"]:::logic
+        STEP2["2. Convert binary → hex"]:::logic
+        STEP3["3. Lookup: WHERE info_hash = ?<br/>OR v1_info_hash = ?"]:::logic
+
+        C1 --> ANN
+        C2 --> ANN
+        C3 --> ANN
+        ANN --> STEP1
+        STEP1 --> STEP2
+        STEP2 --> STEP3
+    end
+
+    STEP3 -- "Verify registered" --> REG
+
+    %% === STAGE 4: UNIFIED SWARM ===
+    subgraph Swarm ["STAGE 4: One Swarm — All Clients Get Same Peers"]
+        STATE[("In-Memory Peer Map<br/>hash → peer_id → addr")]:::memory
+        RESP["Compact peer list<br/>returned to ALL clients"]:::logic
+    end
+
+    STEP3 --> STATE
+    STATE --> RESP
+    RESP --> C1
+    RESP --> C2
+    RESP --> C3
+
+    %% === Styling ===
+    classDef v1 fill:#f59e0b,color:#fff,stroke:#b45309,stroke-width:2px;
+    classDef v2 fill:#8b5cf6,color:#fff,stroke:#4c1d95,stroke-width:2px;
+    classDef hybrid fill:#3b82f6,color:#fff,stroke:#1d4ed8,stroke-width:2px;
+    classDef endpoint fill:#f8fafc,color:#0f172a,stroke:#334155,stroke-dasharray: 5 5;
+    classDef logic fill:#f1f5f9,color:#1e293b,stroke:#94a3b8,stroke-width:2px;
+    classDef storage fill:#10b981,color:#fff,stroke:#064e3b,stroke-width:2px;
+    classDef memory fill:#ec4899,color:#fff,stroke:#9d174d,stroke-width:2px;
+    classDef artifact fill:#fef3c7,color:#92400e,stroke:#fcd34d,stroke-width:2px;
