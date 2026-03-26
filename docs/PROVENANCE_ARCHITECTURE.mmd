@@ -1,0 +1,46 @@
+flowchart TD
+    %% --- Provenance & Identity Architecture Overview ---
+
+    subgraph Publisher [Data Publisher]
+        KEYPAIR{{Ed25519 Keypair}}:::crypto
+        FMT["Raw 32-byte Public Key — BEP 44 Compatible"]:::note
+        KEYPAIR -.-> FMT
+    end
+
+    subgraph Static [1. Static Torrent Signing — Grant Milestone 3]
+        TORRENT[".torrent file"]:::artifact
+        SIG["Ed25519 signature over v1+v2 info hashes"]:::data
+        TORRENT --- SIG
+    end
+
+    subgraph Centralized [2. Registry — Grant Milestone 3]
+        API["Registry API — Sign on Register, Verify on Download"]:::endpoint
+        META["Structured Metadata — Name, License, Category, Tags"]:::data
+        API --- META
+    end
+
+    subgraph Decentralized [3. DHT Resilience — Future Roadmap]
+        DHT["BitTorrent DHT — BEP 44 / BEP 46"]:::future
+        MUTABLE["Mutable Item — infohash pointer, signed, sequenced"]:::futuredata
+        DHT --- MUTABLE
+    end
+
+    %% --- Connections ---
+    KEYPAIR -- "1. Signs Torrent" --> Static
+    KEYPAIR -- "2. Authenticates Registration" --> Centralized
+    KEYPAIR -. "3. Signs DHT Updates" .-> Decentralized
+
+    Static -- "wl create --sign" --> Centralized
+    Centralized -- "wl get / Search / Discover" --> Client([Downloader]):::client
+
+    Decentralized -. "magnet:?xs=urn:btpk:key" .-> Client
+
+    %% --- Styling ---
+    classDef crypto fill:#8b5cf6,color:#fff,stroke:#4c1d95,stroke-width:2px;
+    classDef artifact fill:#f59e0b,color:#fff,stroke:#b45309,stroke-width:2px;
+    classDef endpoint fill:#3b82f6,color:#fff,stroke:#1d4ed8,stroke-width:2px;
+    classDef data fill:#f1f5f9,color:#1e293b,stroke:#cbd5e1,stroke-width:1px;
+    classDef client fill:#ef4444,color:#fff,stroke:#b91c1c,stroke-width:2px;
+    classDef note fill:#fffbeb,color:#92400e,stroke:#fcd34d,stroke-dasharray: 5 5;
+    classDef future fill:#10b981,color:#fff,stroke:#047857,stroke-width:2px,stroke-dasharray: 5 5;
+    classDef futuredata fill:#f1f5f9,color:#1e293b,stroke:#cbd5e1,stroke-width:1px,stroke-dasharray: 5 5;

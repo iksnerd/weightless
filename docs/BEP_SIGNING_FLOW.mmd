@@ -1,0 +1,34 @@
+sequenceDiagram
+    %% --- BEP Draft: Ed25519 Torrent Signing Flow ---
+    %% Shows the publish → register → discover → verify cycle
+
+    participant P as Publisher
+    participant K as Ed25519 Keypair
+    participant T as .torrent File
+    participant R as Weightless Registry
+    participant D as Downloader
+
+    Note over P,D: PUBLISHING (wl create --sign)
+
+    P->>K: Generate or load keypair
+    P->>T: Create hybrid v1+v2 torrent
+    P->>K: Sign(v1_info_hash || v2_info_hash)
+    K-->>T: Embed signature + public key
+
+    P->>R: POST /api/registry<br/>torrent + signature + metadata
+    R->>R: Verify signature against public key
+    R-->>P: Registered ✓ — magnet link returned
+
+    Note over P,D: DOWNLOADING (wl get)
+
+    D->>R: GET /api/registry/{hash}<br/>or BEP 9 metadata exchange
+    R-->>D: .torrent + signature + public key + metadata
+
+    D->>D: Verify: Ed25519(pubkey, sig, v1_hash || v2_hash)
+    D->>D: Download pieces from swarm
+    D->>D: Verify: SHA-1 (v1) + SHA-256 Merkle (v2)
+
+    Note over D: Two verification layers:<br/>1. Provenance — who published this?<br/>2. Integrity — are the bytes correct?
+
+    Note over P,D: KEY FORMAT (BEP 44 Compatible)
+    Note over K: Public key: raw 32 bytes<br/>Signature: raw 64 bytes<br/>Same format as BEP 44 mutable items<br/>Forward-compatible with DHT identity
