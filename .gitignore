@@ -1,0 +1,60 @@
+# Binaries for programs and plugins (root only, not cmd/ subdirs)
+/tracker
+/wl
+/weightless
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.torrent
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# Generated test data
+*.bin
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Build artifacts
+.DS_Store
+*.swp
+*.swo
+
+# Debug logs
+firebase-debug.log
+
+# Go workspace file
+go.work
+go.work.sum
+
+# AI tool config
+.gemini/
+.claude/
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+*.skill
+
+# env files
+.env
+.env.local
+
+# Private docs (not for public repo)
+docs/personal/

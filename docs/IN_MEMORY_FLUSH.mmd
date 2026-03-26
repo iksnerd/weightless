@@ -1,0 +1,38 @@
+flowchart TD
+    %% --- Tracker In-Memory & Persistence Concurrency Model ---
+
+    subgraph Handlers ["HTTP Handlers (High Throughput)"]
+        ANN["/announce<br/>(Adds/Updates Peers)"]:::endpoint
+        SCR["/scrape<br/>(Reads Swarm Stats)"]:::endpoint
+    end
+    
+    subgraph RAM ["In-Memory State (internal/tracker/state.go)"]
+        MUTEX{{"sync.RWMutex"}}:::logic
+        MAP["Swarms Map<br/>map[InfoHash]*Swarm"]:::memory
+    end
+    
+    subgraph Workers ["Background Goroutines"]
+        PRUNE(("Pruner<br/>(Every 2 mins)")):::worker
+        FLUSH(("Flusher<br/>(Every 10 secs)")):::worker
+    end
+    
+    subgraph Database ["Persistence Layer"]
+        SQLITE[("SQLite (WAL Mode)<br/>weightless.db")]:::storage
+    end
+    
+    %% Connections
+    ANN -- "Write (Lock)" --> MUTEX
+    SCR -- "Read (RLock)" --> MUTEX
+    MUTEX --- MAP
+    
+    PRUNE -- "Write (Lock)<br/>Remove peers > 45m old" --> MUTEX
+    
+    FLUSH -- "Read (RLock)<br/>Copy state snapshot" --> MUTEX
+    FLUSH -- "Batch INSERT/UPDATE<br/>Background Transaction" --> SQLITE
+
+    %% Styling
+    classDef endpoint fill:#f8fafc,color:#0f172a,stroke:#334155,stroke-dasharray: 5 5;
+    classDef logic fill:#f1f5f9,color:#1e293b,stroke:#94a3b8,stroke-width:2px;
+    classDef memory fill:#8b5cf6,color:#fff,stroke:#4c1d95,stroke-width:2px;
+    classDef worker fill:#f59e0b,color:#fff,stroke:#b45309,stroke-width:2px;
+    classDef storage fill:#10b981,color:#fff,stroke:#064e3b,stroke-width:2px;

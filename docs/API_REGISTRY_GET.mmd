@@ -1,0 +1,31 @@
+sequenceDiagram
+    %% --- Dual-Path Metadata Resolution for 'wl get' ---
+
+    participant C as wl get (Client)
+    participant T as Tracker API
+    participant P as P2P Swarm
+
+    C->>C: Parse magnet link (extract info_hash)
+    
+    Note over C, T: PATH 1: Fast Path (Weightless Tracker)
+    C->>T: GET /api/registry/{info_hash}
+    
+    alt Found in Registry
+        T-->>C: 200 OK (Full .torrent dict)
+        C->>C: Parse metadata, initialize download
+    else Not Found / Third-Party Tracker
+        T-->>C: 404 / Connection Error
+        
+        Note over C, P: PATH 2: Standard Path (BEP 9 Metadata Exchange)
+        C->>T: GET /announce?info_hash=...
+        T-->>C: Peer List
+        C->>P: TCP Connect & Handshake
+        C->>P: BEP 10 Extension Handshake (ut_metadata)
+        C->>P: Request Metadata Pieces
+        P-->>C: Metadata Pieces
+        C->>C: Assemble & Verify SHA-1 against info_hash
+    end
+    
+    Note over C, P: DOWNLOADING PHASE
+    C->>C: Pre-allocate file on disk
+    C->>P: Request Data Pieces (BEP 3)

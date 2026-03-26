@@ -1,0 +1,8 @@
+runtime: go125
+
+env_variables:
+  DB_PATH: /tmp/weightless.db
+
+handlers:
+- url: /.*
+  script: auto

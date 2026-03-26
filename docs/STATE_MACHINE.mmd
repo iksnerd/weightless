@@ -1,0 +1,23 @@
+stateDiagram-v2
+    %% --- BitTorrent Peer Wire Protocol State Machine (wl get) ---
+    
+    [*] --> TCP_Connect
+    TCP_Connect --> Handshake_Sent
+    Handshake_Sent --> Handshake_Received: Validate info_hash
+    Handshake_Received --> Extension_Handshake: BEP 10 (ut_metadata)
+    
+    state "Data Transfer Phase (BEP 3)" as Data {
+        [*] --> Choked_NotInterested
+        
+        Choked_NotInterested --> Choked_Interested: Send 'Interested'
+        Choked_Interested --> Unchoked_Interested: Receive 'Unchoke'
+        
+        Unchoked_Interested --> Requesting: Send 'Request' (16KiB block)
+        Requesting --> Unchoked_Interested: Receive 'Piece'
+        
+        Unchoked_Interested --> Choked_Interested: Receive 'Choke'
+        Choked_Interested --> Choked_NotInterested: Send 'NotInterested' (Have all pieces)
+    }
+    
+    Extension_Handshake --> Data
+    Data --> [*]: Peer Disconnected / Download Complete
