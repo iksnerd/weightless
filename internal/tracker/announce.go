@@ -74,14 +74,14 @@ func HandleAnnounce(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check registry (Registry-Only Tracking)
-	// We only track swarms for torrents that have been officially registered.
-	// We check both v2 (info_hash) and v1 (v1_info_hash) to support hybrid torrents.
-	var registered int
-	err := DB.QueryRow("SELECT 1 FROM registry WHERE info_hash = ? OR v1_info_hash = ?", hash, hash).Scan(&registered)
-	if err != nil || registered == 0 {
-		TrackerError(w, "Unregistered torrent: info_hash not found in weightless registry")
-		return
+	// Registry-Only Tracking (skip if OPEN_TRACKER=true)
+	if os.Getenv("OPEN_TRACKER") != "true" {
+		var registered int
+		err := DB.QueryRow("SELECT 1 FROM registry WHERE info_hash = ? OR v1_info_hash = ?", hash, hash).Scan(&registered)
+		if err != nil || registered == 0 {
+			TrackerError(w, "Unregistered torrent: info_hash not found in registry")
+			return
+		}
 	}
 
 	// Extract clean IP from RemoteAddr (which is already IP:port)

@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"log"
 	"net/http"
+	"os"
 	"sync/atomic"
 
 	"github.com/zeebo/bencode"
@@ -24,12 +25,13 @@ func HandleScrape(w http.ResponseWriter, r *http.Request) {
 		// Convert binary hash to hex string
 		hash := hex.EncodeToString([]byte(hashRaw))
 
-		// Check registry (Registry-Only Tracking)
-		var registered int
-		err := DB.QueryRow("SELECT 1 FROM registry WHERE info_hash = ? OR v1_info_hash = ?", hash, hash).Scan(&registered)
-		if err != nil || registered == 0 {
-
-			continue
+		// Registry-Only Tracking (skip if OPEN_TRACKER=true)
+		if os.Getenv("OPEN_TRACKER") != "true" {
+			var registered int
+			err := DB.QueryRow("SELECT 1 FROM registry WHERE info_hash = ? OR v1_info_hash = ?", hash, hash).Scan(&registered)
+			if err != nil || registered == 0 {
+				continue
+			}
 		}
 
 		var blocked int
