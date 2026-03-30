@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zeebo/bencode"
 	"weightless/internal/torrent"
 )
 
@@ -208,4 +209,120 @@ func TestMagnetLinkOutput(t *testing.T) {
 	if !strings.Contains(result.MagnetLink, "dn=test.dat") {
 		t.Errorf("magnet missing display name: %s", result.MagnetLink)
 	}
+}
+
+func TestEnvOr(t *testing.T) {
+	// Fallback when env not set
+	os.Unsetenv("WL_TEST_VAR")
+	if got := envOr("WL_TEST_VAR", "default"); got != "default" {
+		t.Errorf("expected fallback 'default', got %q", got)
+	}
+	// Env var takes precedence
+	t.Setenv("WL_TEST_VAR", "custom")
+	if got := envOr("WL_TEST_VAR", "default"); got != "custom" {
+		t.Errorf("expected 'custom', got %q", got)
+	}
+}
+
+func TestRunCreateBadPath(t *testing.T) {
+	err := runCreate(createOpts{
+		path:       "/nonexistent/path/to/nothing",
+		trackerURL: "http://localhost:8080",
+	})
+	if err == nil {
+		t.Error("expected error for nonexistent path")
+	}
+}
+
+func TestRunCreateDirectory(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "dataset")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(sub, "a.txt"), []byte("hello"), 0644)
+	os.WriteFile(filepath.Join(sub, "b.txt"), []byte("world"), 0644)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer server.Close()
+
+	err := runCreate(createOpts{
+		path:       sub,
+		trackerURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("runCreate directory failed: %v", err)
+	}
+
+	// Verify torrent file was created
+	if _, err := os.Stat("dataset.torrent"); err != nil {
+		t.Error("expected dataset.torrent to be created")
+	}
+	os.Remove("dataset.torrent")
+}
+
+func TestRunCreateWithBranding(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.dat")
+	os.WriteFile(path, []byte("branding test"), 0644)
+
+	t.Setenv("WL_SOURCE", "my-tracker.example.com")
+	t.Setenv("WL_CREATED_BY", "My CLI v2.0")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer server.Close()
+
+	err := runCreate(createOpts{
+		path:       path,
+		trackerURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("runCreate failed: %v", err)
+	}
+
+	// Read the torrent and verify branding
+	data, _ := os.ReadFile("test.dat.torrent")
+	var meta map[string]interface{}
+	bencode.DecodeBytes(data, &meta)
+
+	if meta["created by"] != "My CLI v2.0" {
+		t.Errorf("expected created by 'My CLI v2.0', got %v", meta["created by"])
+	}
+	info := meta["info"].(map[string]interface{})
+	if info["source"] != "my-tracker.example.com" {
+		t.Errorf("expected source 'my-tracker.example.com', got %v", info["source"])
+	}
+	os.Remove("test.dat.torrent")
+}
+
+func TestRunCreatePrivateFlag(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.dat")
+	os.WriteFile(path, []byte("private test"), 0644)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer server.Close()
+
+	err := runCreate(createOpts{
+		path:       path,
+		trackerURL: server.URL,
+		private:    true,
+	})
+	if err != nil {
+		t.Fatalf("runCreate failed: %v", err)
+	}
+
+	data, _ := os.ReadFile("test.dat.torrent")
+	var meta map[string]interface{}
+	bencode.DecodeBytes(data, &meta)
+	info := meta["info"].(map[string]interface{})
+
+	if v, _ := info["private"].(int64); v != 1 {
+		t.Errorf("expected private=1, got %v", info["private"])
+	}
+	os.Remove("test.dat.torrent")
 }
