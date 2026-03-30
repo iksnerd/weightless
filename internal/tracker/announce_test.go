@@ -425,8 +425,7 @@ func TestAnnounceBlockedHash(t *testing.T) {
 func TestAnnounceUnregisteredHash(t *testing.T) {
 	DB = SetupTestDB(t) // Note: NOT setupTest, so no hash registered
 	defer DB.Close()
-
-	// Ensure auth is disabled for this test
+	disablePrune = true
 	SetTrackerSecret("")
 
 	req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "peer001", "6881"), nil)
@@ -439,6 +438,29 @@ func TestAnnounceUnregisteredHash(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "Unregistered torrent") {
 		t.Errorf("Expected Unregistered failure reason, got %s", w.Body.String())
+	}
+}
+
+func TestAnnounceOpenTracker(t *testing.T) {
+	DB = SetupTestDB(t) // No hash registered
+	defer DB.Close()
+	disablePrune = true
+	SetTrackerSecret("")
+
+	// Enable open tracker mode
+	t.Setenv("OPEN_TRACKER", "true")
+
+	req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "peer001", "6881"), nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	w := httptest.NewRecorder()
+	HandleAnnounce(w, req)
+
+	body := w.Body.String()
+	if strings.Contains(body, "Unregistered") {
+		t.Errorf("OPEN_TRACKER=true should accept unregistered hashes, got: %s", body)
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected 200, got %d", w.Code)
 	}
 }
 
