@@ -29,6 +29,7 @@ func buildAnnounceURL(hashHex, peerID, port string, extra ...string) string {
 func setupTest(t *testing.T) *sql.DB {
 	t.Helper()
 	DB = SetupTestDB(t)
+	disablePrune = true
 	// Clear and re-init in-memory state
 	State.mu.Lock()
 	State.Peers = make(map[string]map[string]*Peer)

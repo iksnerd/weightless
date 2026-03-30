@@ -81,7 +81,12 @@ func startPruner() {
 	}
 }
 
+var disablePrune bool
+
 func MaybePrunePeers() {
+	if disablePrune {
+		return
+	}
 	// Probabilistically prune peers (1/100 requests)
 	// This helps in serverless environments where a background pruner
 	// may not run frequently.
