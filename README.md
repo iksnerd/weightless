@@ -155,22 +155,35 @@ The `.torrent` file works with any modern client — Transmission 4.x, qBittorre
 
 ## Environment Variables
 
+### Tracker
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8080` | HTTP listen port |
 | `DB_PATH` | `./weightless.db` | SQLite database path |
 | `MAX_PEERS` | `50` | Max peers returned per announce |
 | `REGISTRY_KEY` | _(unset)_ | If set, POST to `/api/registry` requires `X-Weightless-Key` header |
+| `TRACKER_SECRET` | _(unset)_ | If set, enables HMAC-SHA256 passkey auth on `/announce` |
+| `OPEN_TRACKER` | `false` | If `true`, accepts announces for any info_hash (disables registry-only check) |
 | `GCS_ACCESS_KEY` | — | Litestream GCS credentials |
 | `GCS_SECRET_KEY` | — | Litestream GCS credentials |
 | `BACKUP_BUCKET` | — | GCS bucket for Litestream replicas |
 
+### CLI (`wl`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WL_TRACKER` | `http://localhost:8080` | Default tracker URL (overridden by `--tracker` flag) |
+| `WL_SOURCE` | _(unset)_ | Source tag injected into torrent info dict |
+| `WL_CREATED_BY` | _(unset)_ | "Created by" field in torrent metadata |
+
 ## Key Design Decisions
 
-- **Hybrid v1+v2** — Torrents include both SHA-1 pieces (v1) and SHA-256 Merkle trees (v2). Tracker accepts both 20-byte and 32-byte info hashes for broad client compatibility (Transmission, qBittorrent, etc.).
+- **Hybrid v1+v2** — Torrents include both SHA-1 pieces (v1) and SHA-256 Merkle trees (v2). Tracker accepts both 20-byte and 32-byte info hashes for broad client compatibility.
 - **Zero-CGO** — Pure Go SQLite via `modernc.org/sqlite`. Single static binary, no system deps.
-- **the configured `source` tag branding** — Injected into every torrent's info dict, making hashes unique to the Weightless ecosystem.
-- **Public swarm** — No `private` flag. PEX and DHT work alongside the tracker.
+- **Configurable branding** — Source tag and "created by" are set via env vars, not hardcoded. Library users set their own.
+- **Registry-only by default** — Tracker rejects unregistered hashes. Set `OPEN_TRACKER=true` for open tracker mode.
+- **Public torrents by default** — DHT and PEX enabled. Use `--private` flag to disable.
 
 ## Development
 
