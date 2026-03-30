@@ -353,6 +353,55 @@ func TestRegistrySendsV1Hash(t *testing.T) {
 	}
 }
 
+// --- URL handling ---
+
+func TestTrackerURLAppendAnnounce(t *testing.T) {
+	// When tracker URL doesn't contain /announce, it should be appended
+	path := testFile(t, "test.dat", []byte("url test"))
+	var received registryBody
+	server := registryServer(t, &received)
+	defer server.Close()
+
+	// server.URL is like http://127.0.0.1:PORT — no /announce
+	err := runInDir(t, createOpts{
+		path: path, name: "test.dat", trackerURL: server.URL,
+		pieceLen: torrent.MinPieceLength,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Registration should have been sent to server.URL + /api/registry
+	if received.InfoHash == "" {
+		t.Error("expected registration to occur")
+	}
+}
+
+func TestTrackerURLWithAnnounce(t *testing.T) {
+	// When tracker URL already contains /announce, registry URL should strip it
+	path := testFile(t, "test.dat", []byte("url test"))
+	var received registryBody
+	server := registryServer(t, &received)
+	defer server.Close()
+
+	err := runInDir(t, createOpts{
+		path: path, name: "test.dat", trackerURL: server.URL + "/announce",
+		pieceLen: torrent.MinPieceLength,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if received.InfoHash == "" {
+		t.Error("expected registration to occur")
+	}
+}
+
+func TestRegisterBadURL(t *testing.T) {
+	err := registerHash("://bad-url", registryBody{InfoHash: "abc", Name: "Test"}, "")
+	if err == nil {
+		t.Error("expected error for invalid URL")
+	}
+}
+
 // --- Registry error handling ---
 
 func TestRegistryServerError(t *testing.T) {
