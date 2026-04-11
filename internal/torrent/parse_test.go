@@ -8,7 +8,7 @@ import (
 
 func TestParse(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "test_data.bin")
+	path := filepath.Join(dir, "test_parse")
 	if err := os.WriteFile(path, []byte("test parse content"), 0644); err != nil {
 		t.Fatal(err)
 	}

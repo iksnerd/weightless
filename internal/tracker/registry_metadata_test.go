@@ -15,7 +15,7 @@ func TestHandleMetadata(t *testing.T) {
 	defer DB.Close()
 
 	// 1. Create and register a torrent
-	path := "metadata_test.dat"
+	path := "meta-api-test"
 	os.WriteFile(path, []byte("metadata test content"), 0644)
 	defer os.Remove(path)
 
