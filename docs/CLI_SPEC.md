@@ -8,7 +8,11 @@ A single Go binary that creates and downloads hybrid BitTorrent v1+v2 torrents, 
 wl create [flags] <path>
 
 Flags:
-  --name          Display name for the torrent (default: basename of path)
+  --name          Display name for the torrent (default: basename of path).
+                  For single-file torrents, info.name in the torrent is always
+                  the actual filename — --name affects the registry label,
+                  magnet URI dn= param, and output .torrent filename only.
+                  For directory torrents, --name sets info.name directly.
   --tracker       Tracker base URL (default: http://localhost:8080)
   --piece-length  Piece size in bytes, power of 2, >= 16384 (default: 262144)
   --api-key       API key for authenticated registration

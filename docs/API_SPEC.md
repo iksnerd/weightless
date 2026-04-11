@@ -11,7 +11,7 @@ The API applies a strict IP-based Token Bucket rate limit to prevent abuse:
 - **10 request burst capacity**
 
 **Exceeding the limit:**
-- **`/announce/`:** Returns `200 OK` with a bencoded dictionary: `{"failure reason": "Rate limit exceeded. Please slow down."}`
+- **`/announce` and `/announce/`:** Returns `200 OK` with a bencoded dictionary: `{"failure reason": "Rate limit exceeded. Please slow down."}`
 - **All other endpoints:** Returns `429 Too Many Requests`.
 
 ---
