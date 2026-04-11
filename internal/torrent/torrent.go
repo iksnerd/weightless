@@ -137,8 +137,11 @@ func buildSingleFileHybrid(infoDict *orderedDict, pieceLayers map[string]string,
 		return err
 	}
 
+	// For single-file hybrid torrents, the file tree key and info.name must
+	// both match the actual filename so clients can locate the file on disk.
+	filename := filepath.Base(opts.Path)
 	fileTree := map[string]interface{}{
-		opts.Name: map[string]interface{}{
+		filename: map[string]interface{}{
 			"": fr.v2Entry,
 		},
 	}
@@ -149,8 +152,8 @@ func buildSingleFileHybrid(infoDict *orderedDict, pieceLayers map[string]string,
 	infoDict.set("length", int(fr.size))
 	// v2 field
 	infoDict.set("meta version", 2)
-	// shared
-	infoDict.set("name", opts.Name)
+	// shared — use actual filename so v1 clients find the file correctly
+	infoDict.set("name", filename)
 	infoDict.set("piece length", opts.PieceLength)
 	// v1 field: pieces (SHA-1 hashes)
 	infoDict.set("pieces", string(fr.v1PiecesSHA1))

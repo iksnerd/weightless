@@ -58,6 +58,7 @@ func main() {
 		port = "8080"
 	}
 
+	http.HandleFunc("/announce", tracker.GlobalRateLimiter.LimitMiddleware(tracker.HandleAnnounce))
 	http.HandleFunc("/announce/", tracker.GlobalRateLimiter.LimitMiddleware(tracker.HandleAnnounce))
 	http.HandleFunc("/scrape", tracker.GlobalRateLimiter.LimitMiddleware(tracker.HandleScrape))
 	http.HandleFunc("/api/registry", tracker.GlobalRateLimiter.LimitMiddleware(tracker.HandleAPI))
