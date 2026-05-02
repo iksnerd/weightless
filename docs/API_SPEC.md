@@ -27,6 +27,22 @@ Weightless uses path-based **Signed Passkeys** for authenticated tracking. This 
 - **Unauthenticated access**: If `TRACKER_SECRET` is not set on the server, the tracker accepts plain `/announce` (with trailing slash optional).
 - **Enforcement**: If `TRACKER_SECRET` is set, requests to `/announce` or invalid passkeys return a bencoded failure reason.
 
+### Strict input validation (LangSec, since v0.4.0)
+
+The tracker fully recognizes the announce request before any business logic runs. Malformed or out-of-range fields are rejected with a typed BEP 3 bencoded `failure reason` (HTTP 200) — no silent fallbacks.
+
+| Field | Rule |
+|-------|------|
+| `info_hash` | Required. Exactly 20 bytes (v1) or 32 bytes (v2). |
+| `peer_id` | Required. Exactly 20 bytes per BEP 3. |
+| `port` | Required. Integer 1–65535. |
+| `uploaded` / `downloaded` / `left` | If present, non-negative integer. Absent → 0. |
+| `event` | If present, one of `started`, `stopped`, `completed`. |
+| `numwant` | If present, integer 0–1000. |
+| `compact` | If present, `0` or `1`. Default `1` (BEP 23). |
+
+Tracker bencode responses themselves are also bounded (size, depth, list length) on the client side via the shared `internal/bencode` validator — clients ingesting weightless responses will reject pathological replies.
+
 ---
 
 ## Types
