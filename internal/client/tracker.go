@@ -11,6 +11,8 @@ import (
 	"strconv"
 
 	"github.com/zeebo/bencode"
+
+	wbencode "weightless/internal/bencode"
 )
 
 // Announce sends a request to the tracker and returns a list of peer addresses (IP:Port).
@@ -50,6 +52,10 @@ func Announce(ctx context.Context, trackerURL, infoHash, peerID string, port int
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read tracker response: %w", err)
+	}
+
+	if err := wbencode.Validate(data, wbencode.TrackerResponseLimits); err != nil {
+		return nil, fmt.Errorf("validate tracker response: %w", err)
 	}
 
 	var trackerResponse struct {
