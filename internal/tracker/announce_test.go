@@ -34,8 +34,6 @@ func setupTest(t *testing.T) *sql.DB {
 	State.mu.Lock()
 	State.Peers = make(map[string]map[string]*Peer)
 	State.Users = make(map[string]*UserUsage)
-	State.Announces = 0
-	State.Scrapes = 0
 	State.mu.Unlock()
 
 	// Disable passkey auth for standard tests
