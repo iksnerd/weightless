@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/zeebo/bencode"
+
+	wbencode "weightless/internal/bencode"
 )
 
 // FetchMetadata fetches the info dictionary from a peer using BEP 9 metadata exchange.
@@ -45,13 +47,18 @@ func (p *PeerConn) FetchMetadata(ctx context.Context, infoHash []byte) ([]byte, 
 			return nil, fmt.Errorf("could not find end of bencoded header in piece %d", i)
 		}
 
+		// Validate the header bytes structurally before decoding (BEP 9 dict).
+		headerBytes := msg.Payload[1 : 1+dictEnd]
+		if err := wbencode.Validate(headerBytes, wbencode.PeerMessageLimits); err != nil {
+			return nil, fmt.Errorf("validate metadata header: %w", err)
+		}
 		// Decode the header to check msg_type
 		var header struct {
 			MsgType int `bencode:"msg_type"`
 			Piece   int `bencode:"piece"`
 			Total   int `bencode:"total_size"`
 		}
-		if err := bencode.DecodeBytes(msg.Payload[1:1+dictEnd], &header); err != nil {
+		if err := bencode.DecodeBytes(headerBytes, &header); err != nil {
 			return nil, fmt.Errorf("decode metadata header: %w", err)
 		}
 
