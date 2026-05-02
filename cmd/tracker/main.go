@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"weightless/internal/tracker"
 )
 
@@ -66,7 +67,7 @@ func main() {
 	http.HandleFunc("/api/registry/meta", tracker.GlobalRateLimiter.LimitMiddleware(tracker.HandleMetadata))
 	http.HandleFunc("/api/registry/torrent", tracker.GlobalRateLimiter.LimitMiddleware(tracker.HandleTorrentDownload))
 	http.HandleFunc("/health", tracker.HealthHandler)
-	http.HandleFunc("/metrics", tracker.State.MetricsHandler)
+	http.Handle("/metrics", promhttp.Handler())
 	http.HandleFunc("/", tracker.IndexHandler)
 
 	srv := &http.Server{Addr: ":" + port}

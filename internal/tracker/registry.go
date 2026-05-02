@@ -10,7 +10,6 @@ import (
 	"os"
 	"sort"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	"weightless/internal/torrent"
@@ -134,9 +133,9 @@ func HandleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Update registered count in memory
-		var regCount uint64
+		var regCount int64
 		_ = DB.QueryRow("SELECT COUNT(*) FROM registry").Scan(&regCount)
-		atomic.StoreUint64(&State.Registered, regCount)
+		metricRegistered.Set(float64(regCount))
 
 		w.WriteHeader(http.StatusCreated)
 		if err := json.NewEncoder(w).Encode(map[string]string{"status": "created"}); err != nil {
@@ -180,11 +179,11 @@ func HandleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Update registered count in memory
-		var regCount uint64
+		var regCount int64
 		if err := DB.QueryRow("SELECT COUNT(*) FROM registry").Scan(&regCount); err != nil {
 			log.Printf("Registry count error: %v", err)
 		} else {
-			atomic.StoreUint64(&State.Registered, regCount)
+			metricRegistered.Set(float64(regCount))
 		}
 
 		if err := json.NewEncoder(w).Encode(map[string]string{"status": "deleted"}); err != nil {

@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // Peer represents an active BitTorrent peer in memory.
@@ -26,22 +28,52 @@ type UserUsage struct {
 	Downloaded int64
 }
 
-// SwarmState manages the in-memory peer lists, metrics, and user usage sessions.
+// SwarmState manages the in-memory peer lists and user usage sessions.
 type SwarmState struct {
 	mu    sync.RWMutex
 	Peers map[string]map[string]*Peer // info_hash -> peer_id -> Peer
 	Users map[string]*UserUsage       // user_id -> usage deltas
-
-	// Metrics
-	Announces  uint64
-	Scrapes    uint64
-	Registered uint64
 }
 
 var State = &SwarmState{
 	Peers: make(map[string]map[string]*Peer),
 	Users: make(map[string]*UserUsage),
 }
+
+var (
+	metricAnnounces = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "tracker_announces_total",
+		Help: "Total number of announce requests handled",
+	})
+	metricScrapes = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "tracker_scrapes_total",
+		Help: "Total number of scrape requests handled",
+	})
+	metricRegistered = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "tracker_registered_torrents",
+		Help: "Total number of torrents in registry",
+	})
+	_ = promauto.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "tracker_active_peers",
+		Help: "Current number of active peers in memory",
+	}, func() float64 {
+		State.mu.RLock()
+		defer State.mu.RUnlock()
+		total := 0
+		for _, swarm := range State.Peers {
+			total += len(swarm)
+		}
+		return float64(total)
+	})
+	_ = promauto.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "tracker_swarms_total",
+		Help: "Total number of active swarms",
+	}, func() float64 {
+		State.mu.RLock()
+		defer State.mu.RUnlock()
+		return float64(len(State.Peers))
+	})
+)
 
 // TrackUsage updates the in-memory usage deltas for a user.
 func (s *SwarmState) TrackUsage(userID string, uploaded, downloaded int64) {
@@ -100,11 +132,11 @@ func (s *SwarmState) LoadFromDB() error {
 		return fmt.Errorf("LoadFromDB row iteration: %w", err)
 	}
 
-	var regCount uint64
+	var regCount int64
 	_ = DB.QueryRow("SELECT COUNT(*) FROM registry").Scan(&regCount)
-	atomic.StoreUint64(&s.Registered, regCount)
+	metricRegistered.Set(float64(regCount))
 
-	log.Printf("Loaded %d peers and %d torrents into memory", count, s.Registered)
+	log.Printf("Loaded %d peers and %d torrents into memory", count, regCount)
 	return nil
 }
 
@@ -117,7 +149,7 @@ func (s *SwarmState) UpdatePeer(hash, id string, p *Peer) {
 		s.Peers[hash] = make(map[string]*Peer)
 	}
 	s.Peers[hash][id] = p
-	atomic.AddUint64(&s.Announces, 1)
+	metricAnnounces.Inc()
 }
 
 // RemovePeer removes a peer (e.g., on 'stopped' event).
@@ -400,26 +432,4 @@ func (s *SwarmState) PruneMemory() {
 	if count > 0 {
 		log.Printf("Pruned %d stale peers from memory", count)
 	}
-}
-
-// MetricsHandler exposes internal state in Prometheus format.
-func (s *SwarmState) MetricsHandler(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	totalPeers := 0
-	for _, swarm := range s.Peers {
-		totalPeers += len(swarm)
-	}
-
-	fmt.Fprintf(w, "# HELP tracker_announces_total Total number of announce requests handled\n")
-	fmt.Fprintf(w, "tracker_announces_total %d\n", atomic.LoadUint64(&s.Announces))
-	fmt.Fprintf(w, "# HELP tracker_scrapes_total Total number of scrape requests handled\n")
-	fmt.Fprintf(w, "tracker_scrapes_total %d\n", atomic.LoadUint64(&s.Scrapes))
-	fmt.Fprintf(w, "# HELP tracker_active_peers Current number of active peers in memory\n")
-	fmt.Fprintf(w, "tracker_active_peers %d\n", totalPeers)
-	fmt.Fprintf(w, "# HELP tracker_registered_torrents Total number of torrents in registry\n")
-	fmt.Fprintf(w, "tracker_registered_torrents %d\n", atomic.LoadUint64(&s.Registered))
-	fmt.Fprintf(w, "# HELP tracker_swarms_total Total number of active swarms\n")
-	fmt.Fprintf(w, "tracker_swarms_total %d\n", len(s.Peers))
 }

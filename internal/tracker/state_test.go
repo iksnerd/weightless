@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func TestStatePersistence(t *testing.T) {
@@ -138,23 +140,25 @@ func TestStatePruneMemory(t *testing.T) {
 }
 
 func TestMetricsHandler(t *testing.T) {
-	State.Announces = 100
-	State.Scrapes = 50
-	State.Registered = 10
-
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	w := httptest.NewRecorder()
-	State.MetricsHandler(w, req)
+	promhttp.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d", w.Code)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, "tracker_announces_total 100") {
-		t.Error("Metrics missing announces")
-	}
-	if !strings.Contains(body, "tracker_active_peers") {
-		t.Error("Metrics missing active peers")
+	for _, metric := range []string{
+		"tracker_announces_total",
+		"tracker_scrapes_total",
+		"tracker_active_peers",
+		"tracker_registered_torrents",
+		"tracker_swarms_total",
+		"go_goroutines",
+	} {
+		if !strings.Contains(body, metric) {
+			t.Errorf("Metrics missing %s", metric)
+		}
 	}
 }
 
