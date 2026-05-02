@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sync/atomic"
 
 	"github.com/zeebo/bencode"
 )
@@ -13,7 +12,7 @@ import (
 // HandleScrape implements BEP 48 scrape convention.
 // Returns swarm stats (complete, downloaded, incomplete) for each requested info_hash.
 func HandleScrape(w http.ResponseWriter, r *http.Request) {
-	atomic.AddUint64(&State.Scrapes, 1)
+	metricScrapes.Inc()
 	hashesRaw := r.URL.Query()["info_hash"]
 
 	files := make(map[string]interface{})
