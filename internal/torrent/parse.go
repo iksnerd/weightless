@@ -5,7 +5,15 @@ import (
 	"path/filepath"
 
 	"github.com/zeebo/bencode"
+
+	wbencode "weightless/internal/bencode"
 )
+
+// maxFileTreeDepth bounds BEP 52 file-tree recursion. The bencode validator
+// already caps overall nesting depth, but we keep an explicit guard here as
+// defense-in-depth — walkFileTree must not recurse on attacker-controlled
+// structure even if a future caller skips Validate.
+const maxFileTreeDepth = 64
 
 // TorrentMeta holds parsed torrent metadata for display or registry use.
 type TorrentMeta struct {
@@ -23,7 +31,12 @@ type FileEntry struct {
 }
 
 // Parse decodes a bencoded .torrent file into display-friendly metadata.
+// LangSec: structurally validate against TorrentLimits before letting the
+// permissive decoder allocate anything.
 func Parse(data []byte) (TorrentMeta, error) {
+	if err := wbencode.Validate(data, wbencode.TorrentLimits); err != nil {
+		return TorrentMeta{}, fmt.Errorf("torrent validate: %w", err)
+	}
 	var raw map[string]interface{}
 	if err := bencode.DecodeBytes(data, &raw); err != nil {
 		return TorrentMeta{}, fmt.Errorf("bencode decode: %w", err)
@@ -80,7 +93,7 @@ func Parse(data []byte) (TorrentMeta, error) {
 	// If no v1 files list, try v2 file tree (BEP 52)
 	if len(meta.Files) == 0 {
 		if fileTree, ok := info["file tree"].(map[string]interface{}); ok {
-			meta.Files = walkFileTree(fileTree, "")
+			meta.Files = walkFileTree(fileTree, "", 0)
 			for _, f := range meta.Files {
 				meta.TotalSize += f.Length
 			}
@@ -96,7 +109,12 @@ func Parse(data []byte) (TorrentMeta, error) {
 }
 
 // walkFileTree recursively walks a BEP 52 file tree and collects file entries.
-func walkFileTree(tree map[string]interface{}, prefix string) []FileEntry {
+// depth is the current recursion level — bailing out at maxFileTreeDepth
+// caps stack use even if upstream validation was bypassed.
+func walkFileTree(tree map[string]interface{}, prefix string, depth int) []FileEntry {
+	if depth > maxFileTreeDepth {
+		return nil
+	}
 	var files []FileEntry
 	for name, val := range tree {
 		node, ok := val.(map[string]interface{})
@@ -113,7 +131,7 @@ func walkFileTree(tree map[string]interface{}, prefix string) []FileEntry {
 			files = append(files, FileEntry{Path: path, Length: length})
 		} else {
 			// Directory node: recurse
-			files = append(files, walkFileTree(node, path)...)
+			files = append(files, walkFileTree(node, path, depth+1)...)
 		}
 	}
 	return files

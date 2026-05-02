@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/zeebo/bencode"
+
+	wbencode "weightless/internal/bencode"
 )
 
 // Extension ID mapping for BEP 10
@@ -144,6 +146,9 @@ func (p *PeerConn) readExtendedHandshake() error {
 		return fmt.Errorf("expected extended handshake (id 0), got %d", m.Payload[0])
 	}
 
+	if err := wbencode.Validate(m.Payload[1:], wbencode.PeerMessageLimits); err != nil {
+		return fmt.Errorf("validate extended handshake: %w", err)
+	}
 	var handshake struct {
 		M        map[string]int `bencode:"m"`
 		Metadata int            `bencode:"metadata_size"`
