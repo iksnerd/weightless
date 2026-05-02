@@ -131,3 +131,108 @@ func TestHandshakeMismatch(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+// fakePeer accepts one connection, reads the client's handshake, and replies
+// with a custom 68-byte handshake reply. Returns the listener's addr.
+func fakePeer(t *testing.T, reply []byte) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Drain the client's 68-byte handshake.
+		io.ReadFull(conn, make([]byte, 68))
+		conn.Write(reply)
+	}()
+	return ln.Addr().String()
+}
+
+func TestHandshakeRejectsBadPstrlen(t *testing.T) {
+	infoHash := make([]byte, 20)
+	copy(infoHash, "infohash123456789012")
+
+	// Reply claims pstrlen=18 instead of 19 — handshake reads exactly 68
+	// bytes (1+19+8+20+20), so we need to construct a 68-byte buffer with
+	// a bogus first byte. The parser should reject on the length check.
+	reply := make([]byte, 68)
+	reply[0] = 18                          // wrong
+	copy(reply[1:], "BitTorrent protocol") // would be valid magic if length matched
+	copy(reply[1+19+8:], infoHash)
+
+	addr := fakePeer(t, reply)
+	p, err := Connect(context.Background(), addr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer p.Close()
+
+	err = p.Handshake(context.Background(), infoHash, "-WL0001-123456789012")
+	if err == nil {
+		t.Fatal("expected pstrlen rejection")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("pstrlen")) {
+		t.Errorf("expected pstrlen error, got %v", err)
+	}
+}
+
+func TestHandshakeRejectsBadMagic(t *testing.T) {
+	infoHash := make([]byte, 20)
+	copy(infoHash, "infohash123456789012")
+
+	// pstrlen=19 (valid) but magic is wrong.
+	reply := make([]byte, 68)
+	reply[0] = 19
+	copy(reply[1:], "WrongTorrent magic!") // 19 bytes, wrong content
+	copy(reply[1+19+8:], infoHash)
+
+	addr := fakePeer(t, reply)
+	p, err := Connect(context.Background(), addr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer p.Close()
+
+	err = p.Handshake(context.Background(), infoHash, "-WL0001-123456789012")
+	if err == nil {
+		t.Fatal("expected magic-string rejection")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("protocol magic")) {
+		t.Errorf("expected protocol magic error, got %v", err)
+	}
+}
+
+func TestReadMessageBeforeHandshakeRejected(t *testing.T) {
+	// Set up a connection but never handshake.
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	p := &PeerConn{conn: client, state: stateInit}
+
+	if _, err := p.ReadMessage(); err == nil {
+		t.Error("ReadMessage in stateInit should fail")
+	}
+	if err := p.WriteMessage(&Message{ID: 0}); err == nil {
+		t.Error("WriteMessage in stateInit should fail")
+	}
+}
+
+func TestRequestMetadataBeforeExtendedRejected(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	// Handshook but not Extended.
+	p := &PeerConn{conn: client, state: stateHandshook}
+
+	if err := p.RequestMetadata(0); err == nil {
+		t.Error("RequestMetadata before extended handshake should fail")
+	}
+}
