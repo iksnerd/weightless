@@ -3,6 +3,7 @@ package torrent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -77,5 +78,32 @@ func TestParseDirectory(t *testing.T) {
 	}
 	if len(meta.Files) != 2 {
 		t.Errorf("expected 2 files, got %d", len(meta.Files))
+	}
+}
+
+func TestParseRejectsMalformedBencode(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{"empty", []byte{}},
+		{"trailing garbage", []byte("d3:foo3:baree!!")},
+		{"unterminated dict", []byte("d3:foo3:bar")},
+		{"non-bencode", []byte("hello world")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := Parse(c.data); err == nil {
+				t.Errorf("expected error for %s, got nil", c.name)
+			}
+		})
+	}
+}
+
+func TestParseRejectsDeeplyNested(t *testing.T) {
+	// Bencode validator caps depth at 64; build 70-deep nested list.
+	data := []byte(strings.Repeat("l", 70) + strings.Repeat("e", 70))
+	if _, err := Parse(data); err == nil {
+		t.Error("expected depth-limit rejection, got nil")
 	}
 }
