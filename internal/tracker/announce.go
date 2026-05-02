@@ -2,7 +2,6 @@ package tracker
 
 import (
 	"database/sql"
-	"encoding/hex"
 	"log"
 	"net"
 	"net/http"
@@ -24,49 +23,54 @@ func TrackerError(w http.ResponseWriter, reason string) {
 	}
 }
 
+// authenticatePasskey extracts and verifies the path-based passkey
+// (/announce/USER_ID.SIGNATURE). Returns userID + true on success, or
+// writes a TrackerError and returns false on failure.
+func authenticatePasskey(w http.ResponseWriter, r *http.Request) (string, bool) {
+	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(pathParts) >= 2 && pathParts[0] == "announce" {
+		userID, err := VerifyPasskey(pathParts[1])
+		if err != nil {
+			log.Printf("Passkey auth failed: %v", err)
+			TrackerError(w, "Unauthorized")
+			return "", false
+		}
+		return userID, true
+	}
+	if os.Getenv("TRACKER_SECRET") != "" {
+		TrackerError(w, "Unauthorized: Passkey required in path (/announce/ID.SIG)")
+		return "", false
+	}
+	return "", true
+}
+
 func HandleAnnounce(w http.ResponseWriter, r *http.Request) {
 	// In serverless environments, background goroutines might not run.
 	// We run a probabilistic prune on incoming requests.
 	MaybePrunePeers()
 
-	// 1. Extract and Verify Passkey (Path-based)
-	// Expects /announce/USER_ID.SIGNATURE
-	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	var userID string
-	if len(pathParts) >= 2 && pathParts[0] == "announce" {
-		var err error
-		userID, err = VerifyPasskey(pathParts[1])
-		if err != nil {
-			log.Printf("Passkey auth failed: %v", err)
-			TrackerError(w, "Unauthorized")
-			return
-		}
-	} else if os.Getenv("TRACKER_SECRET") != "" {
-		// If secret is set, we ENFORCE signed passkeys
-		TrackerError(w, "Unauthorized: Passkey required in path (/announce/ID.SIG)")
+	// Auth — separate concern from input recognition (path-based, not query).
+	userID, ok := authenticatePasskey(w, r)
+	if !ok {
 		return
 	}
 
-	q := r.URL.Query()
-	hashRaw := q.Get("info_hash")
-	peerID := q.Get("peer_id")
-	port := q.Get("port")
-	event := q.Get("event")
-
-	if hashRaw == "" || peerID == "" || port == "" {
-		TrackerError(w, "Missing required parameters (info_hash, peer_id, port)")
+	// Recognize: full validation before any execution.
+	params, err := RecognizeAnnounce(r.URL.Query())
+	if err != nil {
+		TrackerError(w, "Invalid announce: "+err.Error())
 		return
 	}
 
-	// Accept both v1 (20-byte SHA-1) and v2 (32-byte SHA-256) info hashes
-	// to support hybrid torrents where clients may announce with either hash.
-	if len(hashRaw) != 20 && len(hashRaw) != 32 {
-		TrackerError(w, "Invalid info_hash: must be 20 bytes (v1) or 32 bytes (v2)")
-		return
-	}
+	executeAnnounce(w, r, userID, params)
+}
 
-	// Convert binary hash to hex string for database lookups
-	hash := hex.EncodeToString([]byte(hashRaw))
+// executeAnnounce runs the business logic on a fully-recognized AnnounceParams.
+// No parsing or input validation happens here — every field is already typed
+// and bounded.
+func executeAnnounce(w http.ResponseWriter, r *http.Request, userID string, p AnnounceParams) {
+	hash := p.InfoHashHex()
+	peerID := p.PeerIDString()
 
 	// Check blocklist
 	var blocked int
@@ -94,31 +98,17 @@ func HandleAnnounce(w http.ResponseWriter, r *http.Request) {
 		TrackerError(w, "Invalid remote address")
 		return
 	}
-	addr := net.JoinHostPort(clientIP, port)
+	addr := net.JoinHostPort(clientIP, strconv.Itoa(int(p.Port)))
 
-	// Parse stats (BEP 3) — defaults to 0 on missing/malformed values per spec
-	left, err := strconv.ParseInt(q.Get("left"), 10, 64)
-	if err != nil {
-		left = 0
-	}
-	downloaded, err := strconv.ParseInt(q.Get("downloaded"), 10, 64)
-	if err != nil {
-		downloaded = 0
-	}
-	uploaded, err := strconv.ParseInt(q.Get("uploaded"), 10, 64)
-	if err != nil {
-		uploaded = 0
-	}
-
-	if event == "stopped" {
+	if p.Event == EventStopped {
 		State.RemovePeer(hash, peerID)
 	} else {
 		// Calculate session delta for seeder economy
 		if userID != "" {
 			oldPeer := State.GetPeer(hash, peerID)
 			if oldPeer != nil {
-				deltaUp := uploaded - oldPeer.Uploaded
-				deltaDown := downloaded - oldPeer.Downloaded
+				deltaUp := p.Uploaded - oldPeer.Uploaded
+				deltaDown := p.Downloaded - oldPeer.Downloaded
 				// Sanity check: prevent negative deltas if client resets counters
 				if deltaUp > 0 || deltaDown > 0 {
 					State.TrackUsage(userID, deltaUp, deltaDown)
@@ -129,13 +119,13 @@ func HandleAnnounce(w http.ResponseWriter, r *http.Request) {
 		State.UpdatePeer(hash, peerID, &Peer{
 			Addr:       addr,
 			UpdatedAt:  time.Now().Unix(),
-			Left:       left,
-			Downloaded: downloaded,
-			Uploaded:   uploaded,
+			Left:       p.Left,
+			Downloaded: p.Downloaded,
+			Uploaded:   p.Uploaded,
 		})
 
 		// Track completions for scrape (fire-and-forget)
-		if event == "completed" {
+		if p.Event == EventCompleted {
 			if _, err := DB.Exec("UPDATE registry SET completions = completions + 1 WHERE info_hash = ?", hash); err != nil {
 				log.Printf("Error updating completions: %v", err)
 			}
@@ -144,10 +134,8 @@ func HandleAnnounce(w http.ResponseWriter, r *http.Request) {
 
 	// Determine peer limit: min(numwant, MaxPeers)
 	limit := MaxPeers
-	if nw := q.Get("numwant"); nw != "" {
-		if n, err := strconv.Atoi(nw); err == nil && n > 0 && n < limit {
-			limit = n
-		}
+	if p.NumWant >= 0 && p.NumWant < limit {
+		limit = p.NumWant
 	}
 
 	// Fetch swarm from memory (excluding requester)
