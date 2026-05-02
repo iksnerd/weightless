@@ -58,6 +58,7 @@ go build -o wl ./cmd/wl/
 - **Authenticated Swarms:** Signed passkeys (HMAC-SHA256) for user-level bandwidth tracking without a central user database.
 - **Downtime Resilience:** Three-tier usage tracking (RAM -> SQLite backlog -> external sync) handles network outages gracefully.
 - **Observability:** Exposes a `/metrics` endpoint in Prometheus format.
+- **LangSec-hardened parsers:** Typed announce recognizer, bounded bencode validator, and strict BEP 3 handshake. Every untrusted input boundary recognizes against a formal grammar before any business logic runs — no shotgun parsers in the public attack surface.
 
 **Tracker endpoints:**
 
