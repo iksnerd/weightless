@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/hex"
 	"net/http"
@@ -16,10 +17,21 @@ import (
 // v2Hash is a 32-byte hex string for BEP 52 info_hash in tests.
 const v2Hash = "0123456789012345678901234567890101234567890123456789012345678901" // exactly 64 hex chars
 
-// announceURL builds an announce URL with a binary info_hash (decoded from hex).
+// pid20 pads or truncates s to exactly 20 bytes — the peer_id length BEP 3
+// mandates and the recognizer enforces.
+func pid20(s string) string {
+	b := []byte(s)
+	if len(b) >= 20 {
+		return string(b[:20])
+	}
+	return string(append(b, bytes.Repeat([]byte("x"), 20-len(b))...))
+}
+
+// announceURL builds an announce URL with a binary info_hash (decoded from hex)
+// and a 20-byte peer_id (padded via pid20).
 func buildAnnounceURL(hashHex, peerID, port string, extra ...string) string {
 	bin, _ := hex.DecodeString(hashHex)
-	u := "/announce?info_hash=" + url.QueryEscape(string(bin)) + "&peer_id=" + peerID + "&port=" + port
+	u := "/announce?info_hash=" + url.QueryEscape(string(bin)) + "&peer_id=" + url.QueryEscape(pid20(peerID)) + "&port=" + port
 	for _, e := range extra {
 		u += "&" + e
 	}
@@ -68,9 +80,9 @@ func TestAnnounceMissingParams(t *testing.T) {
 	defer db.Close()
 
 	tests := []string{
-		"/announce?peer_id=peer001&port=6881",                                 // missing info_hash
-		"/announce?info_hash=" + url.QueryEscape(v2Hash) + "&port=6881",       // missing peer_id
-		"/announce?info_hash=" + url.QueryEscape(v2Hash) + "&peer_id=peer001", // missing port
+		"/announce?peer_id=" + url.QueryEscape(pid20("peer001")) + "&port=6881",                            // missing info_hash
+		"/announce?info_hash=" + url.QueryEscape(v2Hash) + "&port=6881",                                    // missing peer_id
+		"/announce?info_hash=" + url.QueryEscape(v2Hash) + "&peer_id=" + url.QueryEscape(pid20("peer001")), // missing port
 	}
 
 	for _, u := range tests {
@@ -127,6 +139,79 @@ func TestAnnounceRejectsShortHash(t *testing.T) {
 	}
 }
 
+func TestAnnounceRejectsShortPeerID(t *testing.T) {
+	db := setupTest(t)
+	defer db.Close()
+
+	bin, _ := hex.DecodeString(v2Hash)
+	// peer_id only 8 bytes — recognizer must reject
+	u := "/announce?info_hash=" + url.QueryEscape(string(bin)) + "&peer_id=shorty00&port=6881"
+	req := httptest.NewRequest("GET", u, nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	w := httptest.NewRecorder()
+	HandleAnnounce(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "peer_id must be exactly 20") {
+		t.Errorf("Expected typed peer_id rejection, got: %s", body)
+	}
+}
+
+func TestAnnounceRejectsBadPort(t *testing.T) {
+	db := setupTest(t)
+	defer db.Close()
+
+	cases := []struct{ port, wantSub string }{
+		{"0", "port"},
+		{"abc", "port"},
+		{"99999", "port"},
+		{"-1", "port"},
+	}
+	for _, c := range cases {
+		t.Run("port="+c.port, func(t *testing.T) {
+			req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "peer001", c.port), nil)
+			req.RemoteAddr = "127.0.0.1:5000"
+			w := httptest.NewRecorder()
+			HandleAnnounce(w, req)
+
+			body := w.Body.String()
+			if !strings.Contains(body, "failure reason") || !strings.Contains(body, c.wantSub) {
+				t.Errorf("Expected port rejection, got: %s", body)
+			}
+		})
+	}
+}
+
+func TestAnnounceRejectsBadEvent(t *testing.T) {
+	db := setupTest(t)
+	defer db.Close()
+
+	req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "peer001", "6881", "event=foo"), nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	w := httptest.NewRecorder()
+	HandleAnnounce(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "event") {
+		t.Errorf("Expected event rejection, got: %s", body)
+	}
+}
+
+func TestAnnounceRejectsNegativeStats(t *testing.T) {
+	db := setupTest(t)
+	defer db.Close()
+
+	req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "peer001", "6881", "uploaded=-5"), nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	w := httptest.NewRecorder()
+	HandleAnnounce(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "uploaded") {
+		t.Errorf("Expected uploaded rejection, got: %s", body)
+	}
+}
+
 func TestAnnounceMultiplePeers(t *testing.T) {
 	db := setupTest(t)
 	defer db.Close()
@@ -165,7 +250,7 @@ func TestAnnouncePeerUpdate(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	HandleAnnounce(w2, req2)
 
-	// Check in-memory state
+	// Check in-memory state — same peer_id should have only one entry
 	peers := State.GetPeers(v2Hash, "none", 10)
 	if len(peers) != 1 {
 		t.Errorf("Expected 1 peer, got %d", len(peers))
@@ -176,7 +261,7 @@ func TestAnnounceWithStoppedEvent(t *testing.T) {
 	db := setupTest(t)
 	defer db.Close()
 
-	State.UpdatePeer(v2Hash, "peer1", &Peer{Addr: "127.0.0.1:6881", UpdatedAt: time.Now().Unix()})
+	State.UpdatePeer(v2Hash, pid20("peer1"), &Peer{Addr: "127.0.0.1:6881", UpdatedAt: time.Now().Unix()})
 
 	req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "peer1", "6881", "event=stopped"), nil)
 	req.RemoteAddr = "127.0.0.1:5000"
@@ -193,8 +278,8 @@ func TestAnnounceExcludesRequester(t *testing.T) {
 	db := setupTest(t)
 	defer db.Close()
 
-	State.UpdatePeer(v2Hash, "peer1", &Peer{Addr: "127.0.0.1:6881", UpdatedAt: time.Now().Unix()})
-	State.UpdatePeer(v2Hash, "peer2", &Peer{Addr: "127.0.0.1:6882", UpdatedAt: time.Now().Unix()})
+	State.UpdatePeer(v2Hash, pid20("peer1"), &Peer{Addr: "127.0.0.1:6881", UpdatedAt: time.Now().Unix()})
+	State.UpdatePeer(v2Hash, pid20("peer2"), &Peer{Addr: "127.0.0.1:6882", UpdatedAt: time.Now().Unix()})
 
 	req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "peer1", "6881"), nil)
 	req.RemoteAddr = "127.0.0.1:5000"
@@ -228,7 +313,7 @@ func TestAnnounceTracksStats(t *testing.T) {
 
 	// Check memory state
 	State.mu.RLock()
-	peer := State.Peers[v2Hash]["seeder"]
+	peer := State.Peers[v2Hash][pid20("seeder")]
 	State.mu.RUnlock()
 	if peer == nil || peer.Left != 0 || peer.Downloaded != 1000 || peer.Uploaded != 500 {
 		t.Errorf("Stats not stored correctly: %+v", peer)
@@ -256,7 +341,7 @@ func TestAnnounceNumwant(t *testing.T) {
 	defer db.Close()
 
 	for i := 0; i < 5; i++ {
-		State.UpdatePeer(v2Hash, string(rune('a'+i)), &Peer{Addr: "127.0.0.1:1000" + string(rune('1'+i)), UpdatedAt: time.Now().Unix()})
+		State.UpdatePeer(v2Hash, pid20(string(rune('a'+i))), &Peer{Addr: "127.0.0.1:1000" + string(rune('1'+i)), UpdatedAt: time.Now().Unix()})
 	}
 
 	req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "requester", "9999", "numwant=2"), nil)
@@ -283,7 +368,7 @@ func TestAnnounceMaxPeersCap(t *testing.T) {
 	defer func() { MaxPeers = oldMax }()
 
 	for i := 0; i < 5; i++ {
-		State.UpdatePeer(v2Hash, string(rune('a'+i)), &Peer{Addr: "127.0.0.1:1000" + string(rune('1'+i)), UpdatedAt: time.Now().Unix()})
+		State.UpdatePeer(v2Hash, pid20(string(rune('a'+i))), &Peer{Addr: "127.0.0.1:1000" + string(rune('1'+i)), UpdatedAt: time.Now().Unix()})
 	}
 
 	req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "requester", "9999", "numwant=10"), nil)
@@ -305,7 +390,7 @@ func TestAnnounceCompactFormat(t *testing.T) {
 	db := setupTest(t)
 	defer db.Close()
 
-	State.UpdatePeer(v2Hash, "peer1", &Peer{Addr: "192.168.1.1:6881", UpdatedAt: time.Now().Unix()})
+	State.UpdatePeer(v2Hash, pid20("peer1"), &Peer{Addr: "192.168.1.1:6881", UpdatedAt: time.Now().Unix()})
 
 	req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "other", "9999"), nil)
 	req.RemoteAddr = "10.0.0.1:5000"
@@ -334,7 +419,7 @@ func TestAnnounceIPv6(t *testing.T) {
 	db := setupTest(t)
 	defer db.Close()
 
-	State.UpdatePeer(v2Hash, "peer6", &Peer{Addr: "[::1]:6881", UpdatedAt: time.Now().Unix()})
+	State.UpdatePeer(v2Hash, pid20("peer6"), &Peer{Addr: "[::1]:6881", UpdatedAt: time.Now().Unix()})
 
 	req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "other", "9999"), nil)
 	req.RemoteAddr = "10.0.0.1:5000"
@@ -415,7 +500,10 @@ func TestAnnounceCompletionDBError(t *testing.T) {
 	w := httptest.NewRecorder()
 	HandleAnnounce(w, req)
 
-	// The announce should still succeed — completion tracking is fire-and-forget
+	// With OPEN_TRACKER not set, the missing registry table now causes the
+	// recognizer-passing announce to fail at the registry-lookup step
+	// (Unregistered torrent). That's still a graceful 200 + bencoded failure,
+	// not a server error.
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected 200 (graceful degradation), got %d", w.Code)
 	}
