@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/bits"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,14 +25,15 @@ const (
 
 // CreateOptions configures torrent creation.
 type CreateOptions struct {
-	Path        string // file or directory to torrent
-	Name        string // torrent name (defaults to basename of Path)
-	PieceLength int    // must be power of 2, >= MinPieceLength
-	AnnounceURL string // tracker announce URL
-	Private     bool   // if true, disables DHT/PEX (BEP 27)
-	Comment     string // optional comment
-	Source      string // source tag in info dict (e.g. "weightless.ai")
-	CreatedBy   string // created by field (e.g. "Weightless CLI v1.0")
+	Path        string   // file or directory to torrent
+	Name        string   // torrent name (defaults to basename of Path)
+	PieceLength int      // must be power of 2, >= MinPieceLength
+	AnnounceURL string   // tracker announce URL
+	Private     bool     // if true, disables DHT/PEX (BEP 27)
+	Comment     string   // optional comment
+	Source      string   // source tag in info dict (e.g. "weightless.ai")
+	CreatedBy   string   // created by field (e.g. "Weightless CLI v1.0")
+	WebSeeds    []string // BEP 19 web seed URLs (top-level url-list; HTTP origin fallback)
 }
 
 // CreateResult holds the output of torrent creation.
@@ -63,6 +65,12 @@ func Create(opts CreateOptions) (*CreateResult, error) {
 	}
 	if opts.PieceLength < MinPieceLength || !isPowerOfTwo(opts.PieceLength) {
 		return nil, fmt.Errorf("piece length must be a power of 2 and >= %d, got %d", MinPieceLength, opts.PieceLength)
+	}
+	for _, ws := range opts.WebSeeds {
+		u, err := url.Parse(ws)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("web seed must be an absolute http(s) URL, got %q", ws)
+		}
 	}
 
 	info, err := os.Stat(opts.Path)
@@ -107,6 +115,11 @@ func Create(opts CreateOptions) (*CreateResult, error) {
 	metaDict.set("info", infoDict)
 	if len(pieceLayers) > 0 {
 		metaDict.set("piece layers", pieceLayers)
+	}
+	// BEP 19 web seeds (top-level, outside the info dict so the info hash is
+	// unaffected). Clients fall back to these HTTP origins when peers are scarce.
+	if len(opts.WebSeeds) > 0 {
+		metaDict.set("url-list", opts.WebSeeds)
 	}
 
 	torrentBytes, err := bencode.EncodeBytes(metaDict)

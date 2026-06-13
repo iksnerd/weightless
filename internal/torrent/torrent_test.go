@@ -147,6 +147,76 @@ func TestHybridGoldenVectors(t *testing.T) {
 	}
 }
 
+func TestCreateWebSeeds(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.bin")
+	data := make([]byte, 64*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := CreateOptions{
+		Path:        path,
+		Name:        "data.bin",
+		PieceLength: 16 * 1024,
+		AnnounceURL: "http://localhost:8080/announce",
+	}
+
+	// Without web seeds: no url-list key, capture baseline hashes.
+	plain, err := Create(base)
+	if err != nil {
+		t.Fatalf("Create (plain) failed: %v", err)
+	}
+	var plainMeta map[string]interface{}
+	if err := bencode.DecodeBytes(plain.TorrentBytes, &plainMeta); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := plainMeta["url-list"]; ok {
+		t.Error("url-list should be absent when no web seeds are given")
+	}
+
+	// With web seeds: url-list present (top-level), info hashes UNCHANGED.
+	seeds := []string{"https://example.com/data.bin", "http://mirror.example.org/data.bin"}
+	ws := base
+	ws.WebSeeds = seeds
+	result, err := Create(ws)
+	if err != nil {
+		t.Fatalf("Create (webseed) failed: %v", err)
+	}
+	if result.InfoHashHex != plain.InfoHashHex || result.InfoHashV1Hex != plain.InfoHashV1Hex {
+		t.Error("web seeds must not change the info hash (url-list is outside the info dict)")
+	}
+
+	var meta map[string]interface{}
+	if err := bencode.DecodeBytes(result.TorrentBytes, &meta); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok := meta["url-list"].([]interface{})
+	if !ok {
+		t.Fatalf("url-list missing or not a list: %T", meta["url-list"])
+	}
+	got := make([]string, len(raw))
+	for i, v := range raw {
+		got[i] = v.(string)
+	}
+	if len(got) != 2 || got[0] != seeds[0] || got[1] != seeds[1] {
+		t.Errorf("url-list = %v, want %v", got, seeds)
+	}
+
+	// Invalid web seed URLs are rejected at the boundary.
+	for _, bad := range []string{"not-a-url", "ftp://x/y", "/relative/path", "https://"} {
+		bw := base
+		bw.WebSeeds = []string{bad}
+		if _, err := Create(bw); err == nil {
+			t.Errorf("Create accepted invalid web seed %q", bad)
+		}
+	}
+}
+
 func TestCreateSingleFileHybrid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.dat")
