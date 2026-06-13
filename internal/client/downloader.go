@@ -2,12 +2,12 @@ package client
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
+	"encoding/binary"
 	"fmt"
 	"log"
-	"math/rand"
 	"strings"
-	"time"
 )
 
 const (
@@ -133,6 +133,14 @@ func downloadPiece(ctx context.Context, p *PeerConn, index int, size int, expect
 			if len(msg.Payload) < 8 {
 				continue
 			}
+			// Validate the block belongs where we expect before writing it, so a
+			// stray/duplicate/reordered block can't land at the wrong offset.
+			// Requests are issued one block at a time, in order.
+			blkIndex := binary.BigEndian.Uint32(msg.Payload[0:4])
+			blkBegin := binary.BigEndian.Uint32(msg.Payload[4:8])
+			if blkIndex != uint32(index) || blkBegin != uint32(downloaded) {
+				continue
+			}
 			block := msg.Payload[8:]
 			if downloaded+len(block) > size {
 				return nil, fmt.Errorf("received block too large")
@@ -181,11 +189,16 @@ func formatPieceSize(n int) string {
 }
 
 func generatePeerID() string {
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, 12)
+	// crypto/rand so two clients started in the same instant don't collide.
+	if _, err := rand.Read(b); err != nil {
+		// rand.Read never returns an error on supported platforms, but fall
+		// back to a fixed-but-valid suffix rather than panicking.
+		return "-WL0020-aaaaaaaaaaaa"
+	}
 	for i := range b {
-		b[i] = charset[r.Intn(len(charset))]
+		b[i] = charset[int(b[i])%len(charset)]
 	}
 	return "-WL0020-" + string(b)
 }

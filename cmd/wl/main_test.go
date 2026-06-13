@@ -624,7 +624,7 @@ func TestGetTrackerNotFound(t *testing.T) {
 	defer server.Close()
 
 	err := runGet(getOpts{
-		magnetURI:  "magnet:?xt=urn:btih:deadbeef&dn=missing",
+		magnetURI:  "magnet:?xt=urn:btih:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef&dn=missing",
 		trackerURL: server.URL,
 	})
 	if err == nil {
@@ -637,7 +637,7 @@ func TestGetTrackerNotFound(t *testing.T) {
 
 func TestGetTrackerDown(t *testing.T) {
 	err := runGet(getOpts{
-		magnetURI:  "magnet:?xt=urn:btih:deadbeef&dn=unreachable",
+		magnetURI:  "magnet:?xt=urn:btih:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef&dn=unreachable",
 		trackerURL: "http://127.0.0.1:1",
 	})
 	if err == nil {

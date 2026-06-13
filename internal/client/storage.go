@@ -95,5 +95,11 @@ func (s *Storage) WritePiece(pieceIndex int, pieceLength int, data []byte) error
 		currentPos = fileEnd
 	}
 
+	// Every byte of the piece must have mapped to a file; otherwise the
+	// piece-to-file offset math is wrong and we'd silently drop data.
+	if dataOffset != bytesToWrite {
+		return fmt.Errorf("piece %d: wrote %d of %d bytes (offset mapping mismatch)", pieceIndex, dataOffset, bytesToWrite)
+	}
+
 	return nil
 }

@@ -40,10 +40,21 @@ func ParseMagnet(uri string) (Magnet, error) {
 	for _, xt := range params["xt"] {
 		switch {
 		case strings.HasPrefix(xt, "urn:btih:"):
-			m.InfoHashV1 = strings.ToLower(xt[len("urn:btih:"):])
+			v1 := strings.ToLower(xt[len("urn:btih:"):])
+			// This implementation is hex-only (no base32): a v1 info hash is
+			// the 40-char hex of a 20-byte SHA-1.
+			if !isHex(v1, 40) {
+				return Magnet{}, fmt.Errorf("invalid v1 info hash in magnet: %q", v1)
+			}
+			m.InfoHashV1 = v1
 		case strings.HasPrefix(xt, "urn:btmh:1220"):
-			// Multihash: 0x12 = SHA-256, 0x20 = 32 bytes
-			m.InfoHashV2 = strings.ToLower(xt[len("urn:btmh:1220"):])
+			// Multihash prefix 1220: 0x12 = SHA-256, 0x20 = 32 bytes, so the
+			// remainder must be the 64-char hex of a 32-byte digest.
+			v2 := strings.ToLower(xt[len("urn:btmh:1220"):])
+			if !isHex(v2, 64) {
+				return Magnet{}, fmt.Errorf("invalid v2 info hash in magnet: %q", v2)
+			}
+			m.InfoHashV2 = v2
 		}
 	}
 
@@ -55,4 +66,17 @@ func ParseMagnet(uri string) (Magnet, error) {
 	m.Trackers = params["tr"]
 
 	return m, nil
+}
+
+// isHex reports whether s is exactly n lowercase hex characters.
+func isHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
