@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +137,32 @@ func TestStatePruneMemory(t *testing.T) {
 	peers := State.GetPeers(hash, "none", 10)
 	if len(peers) != 1 || peers[0] != "1.1.1.1:1" {
 		t.Errorf("Expected 1 fresh peer, got %v", peers)
+	}
+}
+
+func TestStateGetPeersLimit(t *testing.T) {
+	State.mu.Lock()
+	State.Peers = make(map[string]map[string]*Peer)
+	State.mu.Unlock()
+
+	hash := "limithash"
+	now := time.Now().Unix()
+	for i := 0; i < 5; i++ {
+		id := "p" + strconv.Itoa(i)
+		State.UpdatePeer(hash, id, &Peer{Addr: id + ":1", UpdatedAt: now})
+	}
+
+	// limit 0 (numwant=0) must return no peers, not one.
+	if got := State.GetPeers(hash, "none", 0); len(got) != 0 {
+		t.Errorf("limit 0: expected 0 peers, got %d (%v)", len(got), got)
+	}
+	// A positive limit caps the result.
+	if got := State.GetPeers(hash, "none", 3); len(got) != 3 {
+		t.Errorf("limit 3: expected 3 peers, got %d", len(got))
+	}
+	// A limit above the swarm size returns all peers.
+	if got := State.GetPeers(hash, "none", 10); len(got) != 5 {
+		t.Errorf("limit 10: expected 5 peers, got %d", len(got))
 	}
 }
 

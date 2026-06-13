@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"weightless/internal/torrent"
@@ -212,8 +213,21 @@ func HandleTorrentDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/x-bittorrent")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.torrent"`, name))
+	// Sanitize the DB-sourced name before interpolating into the header so a
+	// quote or control char can't break out of the quoted-string / inject.
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.torrent"`, sanitizeFilename(name)))
 	w.Write(data)
+}
+
+// sanitizeFilename drops characters that would break out of a quoted-string
+// HTTP header value (quotes, backslashes, control chars including CR/LF).
+func sanitizeFilename(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == '"' || r == '\\' || r == 0x7f {
+			return -1
+		}
+		return r
+	}, name)
 }
 
 func HandleSearch(w http.ResponseWriter, r *http.Request) {
@@ -264,14 +278,18 @@ func HandleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Sorting — seeders is memory-only, so DB sorts by created_at and we re-sort after
+	// Sorting — seeder counts are memory-only (not in SQLite), so they can't be
+	// sorted or paginated in SQL. For that path we scan the matching set (capped)
+	// and sort + paginate in memory below.
 	sortCol := "created_at"
+	sortBySeeders := false
 	switch q.Get("sort") {
 	case "completions":
 		sortCol = "completions"
 	case "seeders":
-		sortCol = "created_at" // DB fallback; post-query sort below
+		sortBySeeders = true
 	}
+	const seedersSortScanCap = 1000
 
 	// Get total count
 	var total int
@@ -284,7 +302,11 @@ func HandleSearch(w http.ResponseWriter, r *http.Request) {
 
 	// Main query
 	query := "SELECT " + registryCols + " FROM registry" + where
-	query += fmt.Sprintf(" ORDER BY %s DESC LIMIT %d OFFSET %d", sortCol, limit, offset)
+	if sortBySeeders {
+		query += fmt.Sprintf(" ORDER BY %s DESC LIMIT %d", sortCol, seedersSortScanCap)
+	} else {
+		query += fmt.Sprintf(" ORDER BY %s DESC LIMIT %d OFFSET %d", sortCol, limit, offset)
+	}
 
 	rows, err := DB.Query(query, args...)
 	if err != nil {
@@ -309,11 +331,23 @@ func HandleSearch(w http.ResponseWriter, r *http.Request) {
 
 	fillSwarmStats(results)
 
-	// Seeders are memory-only (not in SQLite), so sort post-query
-	if q.Get("sort") == "seeders" {
+	// Seeders are memory-only (not in SQLite), so sort then paginate in memory.
+	if sortBySeeders {
+		if total > seedersSortScanCap {
+			log.Printf("seeders sort scanned %d of %d matching rows; ranking may be incomplete", seedersSortScanCap, total)
+		}
 		sort.Slice(results, func(i, j int) bool {
 			return results[i].Seeders > results[j].Seeders
 		})
+		start := offset
+		if start > len(results) {
+			start = len(results)
+		}
+		end := start + limit
+		if end > len(results) {
+			end = len(results)
+		}
+		results = results[start:end]
 	}
 
 	if err := json.NewEncoder(w).Encode(results); err != nil {
