@@ -61,6 +61,7 @@ func Announce(ctx context.Context, trackerURL, infoHash, peerID string, port int
 	var trackerResponse struct {
 		FailureReason string `bencode:"failure reason"`
 		Peers         string `bencode:"peers"`
+		Peers6        string `bencode:"peers6"`
 	}
 
 	if err := bencode.DecodeBytes(data, &trackerResponse); err != nil {
@@ -71,12 +72,22 @@ func Announce(ctx context.Context, trackerURL, infoHash, peerID string, port int
 		return nil, fmt.Errorf("tracker failure: %s", trackerResponse.FailureReason)
 	}
 
-	return unpackPeers([]byte(trackerResponse.Peers))
+	// BEP 3 compact IPv4 (6 bytes/peer) plus BEP 7 compact IPv6 (18 bytes/peer).
+	addrs, err := unpackPeers([]byte(trackerResponse.Peers), net.IPv4len)
+	if err != nil {
+		return nil, err
+	}
+	addrs6, err := unpackPeers([]byte(trackerResponse.Peers6), net.IPv6len)
+	if err != nil {
+		return nil, err
+	}
+	return append(addrs, addrs6...), nil
 }
 
-// unpackPeers parses the compact BEP 3 peer list (6 bytes per peer: 4 for IPv4, 2 for port).
-func unpackPeers(peers []byte) ([]string, error) {
-	const peerSize = 6
+// unpackPeers parses a compact peer list: ipLen address bytes (4 for IPv4,
+// 16 for IPv6) followed by a 2-byte big-endian port, per peer.
+func unpackPeers(peers []byte, ipLen int) ([]string, error) {
+	peerSize := ipLen + 2
 	if len(peers)%peerSize != 0 {
 		return nil, fmt.Errorf("invalid peers string length: %d", len(peers))
 	}
@@ -86,8 +97,8 @@ func unpackPeers(peers []byte) ([]string, error) {
 
 	for i := 0; i < numPeers; i++ {
 		offset := i * peerSize
-		ip := net.IPv4(peers[offset], peers[offset+1], peers[offset+2], peers[offset+3])
-		port := binary.BigEndian.Uint16(peers[offset+4 : offset+6])
+		ip := net.IP(peers[offset : offset+ipLen])
+		port := binary.BigEndian.Uint16(peers[offset+ipLen : offset+peerSize])
 		addrs[i] = net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))
 	}
 
