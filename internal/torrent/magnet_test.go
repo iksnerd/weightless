@@ -4,18 +4,25 @@ import (
 	"testing"
 )
 
+// Valid-length hex fixtures: v1 is 40 hex chars (20-byte SHA-1), v2 is 64 (32-byte SHA-256).
+const (
+	v1Hex      = "0123456789abcdef0123456789abcdef01234567"
+	v1HexUpper = "0123456789ABCDEF0123456789ABCDEF01234567"
+	v2Hex      = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+)
+
 func TestParseMagnetHybrid(t *testing.T) {
 	t.Parallel()
-	uri := "magnet:?xt=urn:btih:abc123def456&xt=urn:btmh:1220fedcba9876543210&dn=TestFile&tr=http://tracker:8080/announce"
+	uri := "magnet:?xt=urn:btih:" + v1Hex + "&xt=urn:btmh:1220" + v2Hex + "&dn=TestFile&tr=http://tracker:8080/announce"
 	m, err := ParseMagnet(uri)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.InfoHashV1 != "abc123def456" {
-		t.Errorf("v1 hash = %q, want abc123def456", m.InfoHashV1)
+	if m.InfoHashV1 != v1Hex {
+		t.Errorf("v1 hash = %q, want %s", m.InfoHashV1, v1Hex)
 	}
-	if m.InfoHashV2 != "fedcba9876543210" {
-		t.Errorf("v2 hash = %q, want fedcba9876543210", m.InfoHashV2)
+	if m.InfoHashV2 != v2Hex {
+		t.Errorf("v2 hash = %q, want %s", m.InfoHashV2, v2Hex)
 	}
 	if m.DisplayName != "TestFile" {
 		t.Errorf("display name = %q, want TestFile", m.DisplayName)
@@ -27,25 +34,25 @@ func TestParseMagnetHybrid(t *testing.T) {
 
 func TestParseMagnetV1Only(t *testing.T) {
 	t.Parallel()
-	uri := "magnet:?xt=urn:btih:AABBCCDD&dn=V1Only"
+	uri := "magnet:?xt=urn:btih:" + v1Hex + "&dn=V1Only"
 	m, err := ParseMagnet(uri)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.InfoHashV1 != "aabbccdd" {
-		t.Errorf("v1 hash = %q, want aabbccdd", m.InfoHashV1)
+	if m.InfoHashV1 != v1Hex {
+		t.Errorf("v1 hash = %q, want %s", m.InfoHashV1, v1Hex)
 	}
 	if m.InfoHashV2 != "" {
 		t.Errorf("v2 hash should be empty, got %q", m.InfoHashV2)
 	}
-	if m.BestHash() != "aabbccdd" {
-		t.Errorf("BestHash = %q, want aabbccdd", m.BestHash())
+	if m.BestHash() != v1Hex {
+		t.Errorf("BestHash = %q, want %s", m.BestHash(), v1Hex)
 	}
 }
 
 func TestParseMagnetV2Only(t *testing.T) {
 	t.Parallel()
-	uri := "magnet:?xt=urn:btmh:1220abcdef1234567890"
+	uri := "magnet:?xt=urn:btmh:1220" + v2Hex
 	m, err := ParseMagnet(uri)
 	if err != nil {
 		t.Fatal(err)
@@ -53,29 +60,29 @@ func TestParseMagnetV2Only(t *testing.T) {
 	if m.InfoHashV1 != "" {
 		t.Errorf("v1 hash should be empty, got %q", m.InfoHashV1)
 	}
-	if m.InfoHashV2 != "abcdef1234567890" {
-		t.Errorf("v2 hash = %q, want abcdef1234567890", m.InfoHashV2)
+	if m.InfoHashV2 != v2Hex {
+		t.Errorf("v2 hash = %q, want %s", m.InfoHashV2, v2Hex)
 	}
-	if m.BestHash() != "abcdef1234567890" {
+	if m.BestHash() != v2Hex {
 		t.Errorf("BestHash should prefer v2")
 	}
 }
 
 func TestParseMagnetBestHashPrefersV2(t *testing.T) {
 	t.Parallel()
-	uri := "magnet:?xt=urn:btih:v1hash&xt=urn:btmh:1220v2hash"
+	uri := "magnet:?xt=urn:btih:" + v1Hex + "&xt=urn:btmh:1220" + v2Hex
 	m, err := ParseMagnet(uri)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.BestHash() != "v2hash" {
+	if m.BestHash() != v2Hex {
 		t.Errorf("BestHash should prefer v2, got %q", m.BestHash())
 	}
 }
 
 func TestParseMagnetMultipleTrackers(t *testing.T) {
 	t.Parallel()
-	uri := "magnet:?xt=urn:btih:abc&tr=http://one/announce&tr=http://two/announce"
+	uri := "magnet:?xt=urn:btih:" + v1Hex + "&tr=http://one/announce&tr=http://two/announce"
 	m, err := ParseMagnet(uri)
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +110,7 @@ func TestParseMagnetNotMagnet(t *testing.T) {
 
 func TestParseMagnetNoDisplayName(t *testing.T) {
 	t.Parallel()
-	uri := "magnet:?xt=urn:btih:abc123"
+	uri := "magnet:?xt=urn:btih:" + v1Hex
 	m, err := ParseMagnet(uri)
 	if err != nil {
 		t.Fatal(err)
@@ -116,12 +123,33 @@ func TestParseMagnetNoDisplayName(t *testing.T) {
 func TestParseMagnetCaseInsensitive(t *testing.T) {
 	t.Parallel()
 	// Hashes should be lowercased
-	uri := "magnet:?xt=urn:btih:AABBCCDD"
+	uri := "magnet:?xt=urn:btih:" + v1HexUpper
 	m, err := ParseMagnet(uri)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.InfoHashV1 != "aabbccdd" {
+	if m.InfoHashV1 != v1Hex {
 		t.Errorf("expected lowercase hash, got %q", m.InfoHashV1)
+	}
+}
+
+func TestParseMagnetRejectsMalformedHash(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		uri  string
+	}{
+		{"v1 too short", "magnet:?xt=urn:btih:abc123"},
+		{"v1 non-hex", "magnet:?xt=urn:btih:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"},
+		{"v2 too short", "magnet:?xt=urn:btmh:1220abcdef"},
+		{"v2 non-hex", "magnet:?xt=urn:btmh:1220" + "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := ParseMagnet(tt.uri); err == nil {
+				t.Errorf("ParseMagnet(%q) = nil error, want rejection", tt.uri)
+			}
+		})
 	}
 }
