@@ -9,6 +9,49 @@ import (
 	"github.com/zeebo/bencode"
 )
 
+func TestFetchMetadataEndToEnd(t *testing.T) {
+	t.Parallel()
+	// Arbitrary bytes — FetchMetadata only SHA-1-verifies, it doesn't parse.
+	// Use >16 KiB to exercise multi-piece assembly.
+	metaBytes := make([]byte, 40000)
+	for i := range metaBytes {
+		metaBytes[i] = byte(i * 7)
+	}
+	infoHash := sha1.Sum(metaBytes)
+
+	ln, err := listenTCP(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			serveMetadataPeer(c, metaBytes)
+		}
+	}()
+
+	ctx := context.Background()
+	p, err := Connect(ctx, ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err := p.Handshake(ctx, infoHash[:], "-WL0020-abcdef012345"); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	if p.MetadataSize != len(metaBytes) {
+		t.Fatalf("MetadataSize = %d, want %d", p.MetadataSize, len(metaBytes))
+	}
+	got, err := p.FetchMetadata(ctx, infoHash[:])
+	if err != nil {
+		t.Fatalf("FetchMetadata: %v", err)
+	}
+	if !bytes.Equal(got, metaBytes) {
+		t.Errorf("fetched metadata mismatch: got %d bytes, want %d", len(got), len(metaBytes))
+	}
+}
+
 func TestFetchMetadataRejectsBadSize(t *testing.T) {
 	t.Parallel()
 	// The size guards run before any network I/O, so a bare PeerConn is enough.

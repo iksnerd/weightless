@@ -47,6 +47,26 @@ func Parse(data []byte) (TorrentMeta, error) {
 		return TorrentMeta{}, fmt.Errorf("missing or invalid info dict")
 	}
 
+	return parseInfoMap(info), nil
+}
+
+// ParseInfo decodes a bare bencoded info dictionary (the value of the "info"
+// key, as returned by BEP 9 ut_metadata exchange) into TorrentMeta. Same LangSec
+// posture as Parse: validate the structure before the permissive decoder runs.
+func ParseInfo(infoData []byte) (TorrentMeta, error) {
+	if err := wbencode.Validate(infoData, wbencode.TorrentLimits); err != nil {
+		return TorrentMeta{}, fmt.Errorf("info dict validate: %w", err)
+	}
+	var info map[string]interface{}
+	if err := bencode.DecodeBytes(infoData, &info); err != nil {
+		return TorrentMeta{}, fmt.Errorf("bencode decode: %w", err)
+	}
+	return parseInfoMap(info), nil
+}
+
+// parseInfoMap extracts TorrentMeta fields from a decoded info dict. Shared by
+// Parse (full .torrent) and ParseInfo (bare info dict from a peer).
+func parseInfoMap(info map[string]interface{}) TorrentMeta {
 	meta := TorrentMeta{}
 	if v, ok := info["name"].(string); ok {
 		meta.Name = v
@@ -105,7 +125,7 @@ func Parse(data []byte) (TorrentMeta, error) {
 		meta.PieceCount = int((meta.TotalSize + int64(meta.PieceLength) - 1) / int64(meta.PieceLength))
 	}
 
-	return meta, nil
+	return meta
 }
 
 // walkFileTree recursively walks a BEP 52 file tree and collects file entries.
