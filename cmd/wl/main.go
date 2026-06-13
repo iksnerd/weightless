@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -64,17 +65,22 @@ func main() {
 		category := createCmd.String("category", "", "Category (e.g. models, datasets)")
 		tags := createCmd.String("tags", "", "Comma-separated tags")
 		comment := createCmd.String("comment", "", "Optional comment in the torrent file")
+		stream := createCmd.String("stream", "", "Torrentify a remote http(s) URL without downloading it (carried as a web seed)")
 		var webseeds stringSlice
 		createCmd.Var(&webseeds, "webseed", "BEP 19 web seed URL (HTTP origin fallback); repeatable")
 		createCmd.Parse(os.Args[2:])
 
-		path := createCmd.Arg(0)
-		if path == "" {
-			log.Fatal("Path is required: wl create [--name NAME] <path>")
+		srcPath := createCmd.Arg(0)
+		if srcPath == "" && *stream == "" {
+			log.Fatal("Provide a path or --stream URL: wl create [--name NAME] <path> | wl create --stream <url>")
+		}
+		if srcPath != "" && *stream != "" {
+			log.Fatal("Provide either a path or --stream, not both")
 		}
 
 		opts := createOpts{
-			path:        path,
+			path:        srcPath,
+			stream:      *stream,
 			name:        *name,
 			trackerURL:  *tracker,
 			pieceLen:    *pieceLen,
@@ -125,6 +131,7 @@ func main() {
 
 type createOpts struct {
 	path        string
+	stream      string
 	name        string
 	trackerURL  string
 	pieceLen    int
@@ -151,48 +158,18 @@ func (s *stringSlice) Set(v string) error {
 }
 
 func runCreate(opts createOpts) error {
-	absPath, err := filepath.Abs(opts.path)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
-
-	if opts.name == "" {
-		opts.name = filepath.Base(absPath)
-	}
-
 	announceURL := buildAnnounceURL(opts.trackerURL, opts.userID, opts.secret)
 
-	fmt.Printf("Creating torrent for %s...\n", absPath)
-
-	result, err := torrent.Create(torrent.CreateOptions{
-		Path:        absPath,
-		Name:        opts.name,
-		PieceLength: opts.pieceLen,
-		AnnounceURL: announceURL,
-		Private:     opts.private,
-		Comment:     opts.comment,
-		Source:      envOr("WL_SOURCE", ""),
-		CreatedBy:   envOr("WL_CREATED_BY", ""),
-		WebSeeds:    opts.webseeds,
-	})
-	if err != nil {
-		return fmt.Errorf("create torrent: %w", err)
-	}
-
-	// Get file/dir size for registry
+	var result *torrent.CreateResult
 	var totalSize int64
-	info, err := os.Stat(absPath)
-	if err == nil {
-		if info.IsDir() {
-			filepath.Walk(absPath, func(_ string, fi os.FileInfo, _ error) error {
-				if fi != nil && !fi.IsDir() {
-					totalSize += fi.Size()
-				}
-				return nil
-			})
-		} else {
-			totalSize = info.Size()
-		}
+	var err error
+	if opts.stream != "" {
+		result, totalSize, opts.name, err = createFromStream(opts, announceURL)
+	} else {
+		result, totalSize, opts.name, err = createFromPath(opts, announceURL)
+	}
+	if err != nil {
+		return err
 	}
 
 	// Write .torrent file
@@ -232,6 +209,99 @@ func runCreate(opts createOpts) error {
 	fmt.Printf("Hash:    %s\n", result.InfoHashHex)
 	fmt.Printf("Magnet:  %s\n", result.MagnetLink)
 	return nil
+}
+
+// createFromPath builds a torrent from a local file or directory.
+// Returns the result, total size, and resolved name.
+func createFromPath(opts createOpts, announceURL string) (*torrent.CreateResult, int64, string, error) {
+	absPath, err := filepath.Abs(opts.path)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("resolve path: %w", err)
+	}
+	name := opts.name
+	if name == "" {
+		name = filepath.Base(absPath)
+	}
+
+	fmt.Printf("Creating torrent for %s...\n", absPath)
+	result, err := torrent.Create(torrent.CreateOptions{
+		Path:        absPath,
+		Name:        name,
+		PieceLength: opts.pieceLen,
+		AnnounceURL: announceURL,
+		Private:     opts.private,
+		Comment:     opts.comment,
+		Source:      envOr("WL_SOURCE", ""),
+		CreatedBy:   envOr("WL_CREATED_BY", ""),
+		WebSeeds:    opts.webseeds,
+	})
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("create torrent: %w", err)
+	}
+
+	var totalSize int64
+	if info, err := os.Stat(absPath); err == nil {
+		if info.IsDir() {
+			filepath.Walk(absPath, func(_ string, fi os.FileInfo, _ error) error {
+				if fi != nil && !fi.IsDir() {
+					totalSize += fi.Size()
+				}
+				return nil
+			})
+		} else {
+			totalSize = info.Size()
+		}
+	}
+	return result, totalSize, name, nil
+}
+
+// createFromStream torrentifies a remote HTTP origin without downloading it to
+// disk: it streams the body once to hash it, and carries the origin URL as a
+// web seed so clients can fetch from it. Requires a known Content-Length.
+func createFromStream(opts createOpts, announceURL string) (*torrent.CreateResult, int64, string, error) {
+	streamURL := opts.stream
+	u, err := url.Parse(streamURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return nil, 0, "", fmt.Errorf("--stream must be an http(s) URL, got %q", streamURL)
+	}
+	name := opts.name
+	if name == "" {
+		name = path.Base(u.Path)
+	}
+	if name == "" || name == "." || name == "/" {
+		return nil, 0, "", fmt.Errorf("could not derive a name from %q; pass --name", streamURL)
+	}
+
+	fmt.Printf("Streaming and hashing %s...\n", streamURL)
+	resp, err := http.Get(streamURL)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("fetch stream: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, 0, "", fmt.Errorf("stream origin returned status %d", resp.StatusCode)
+	}
+	if resp.ContentLength <= 0 {
+		return nil, 0, "", fmt.Errorf("stream origin did not report a Content-Length; cannot hash without a known size")
+	}
+
+	// The origin is itself a web seed; add it (deduped) to any explicit ones.
+	webseeds := append([]string{streamURL}, opts.webseeds...)
+
+	result, err := torrent.CreateStream(torrent.CreateOptions{
+		Name:        name,
+		PieceLength: opts.pieceLen,
+		AnnounceURL: announceURL,
+		Private:     opts.private,
+		Comment:     opts.comment,
+		Source:      envOr("WL_SOURCE", ""),
+		CreatedBy:   envOr("WL_CREATED_BY", ""),
+		WebSeeds:    webseeds,
+	}, resp.Body, resp.ContentLength, name)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("create torrent from stream: %w", err)
+	}
+	return result, resp.ContentLength, name, nil
 }
 
 type registryBody struct {
