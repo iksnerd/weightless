@@ -177,10 +177,11 @@ func (s *SwarmState) GetPeers(hash, excludeID string, limit int) []string {
 		if id == excludeID {
 			continue
 		}
-		addrs = append(addrs, p.Addr)
+		// Check before appending so a limit of 0 (numwant=0) returns no peers.
 		if len(addrs) >= limit {
 			break
 		}
+		addrs = append(addrs, p.Addr)
 	}
 	return addrs
 }
