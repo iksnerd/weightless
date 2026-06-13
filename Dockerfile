@@ -14,10 +14,14 @@ RUN CGO_ENABLED=0 go build \
 # Use a lightweight alpine image for the final container
 FROM alpine:latest
 
-# Install Litestream
-RUN apk add --no-cache ca-certificates
-ADD https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz /tmp/litestream.tar.gz
-RUN tar -C /usr/local/bin -xzf /tmp/litestream.tar.gz
+# Install Litestream (multi-arch: amd64 or arm64).
+# TARGETARCH is auto-set by BuildKit; default to amd64 so a plain `docker build` still works.
+ARG TARGETARCH=amd64
+RUN apk add --no-cache ca-certificates curl && \
+    curl -fsSL "https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-${TARGETARCH}.tar.gz" \
+      -o /tmp/litestream.tar.gz && \
+    tar -C /usr/local/bin -xzf /tmp/litestream.tar.gz && \
+    rm /tmp/litestream.tar.gz
 
 # Create data directory
 RUN mkdir -p /data

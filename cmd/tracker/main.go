@@ -79,12 +79,16 @@ func main() {
 		<-sigChan
 		log.Println("Shutting down... stopping tickers and flushing final state to DB")
 		close(done)
-		tracker.State.FlushToDB()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		// Stop accepting new announces first so the final flush captures all state,
+		// then mirror the periodic flusher (state + users + backlog).
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Printf("Shutdown error: %v", err)
 		}
+		tracker.State.FlushToDB()
+		tracker.State.FlushUsers()
+		tracker.State.DrainBacklog()
 	}()
 
 	fmt.Printf("Weightless Tracker %s (%s) live on :%s\n", version, commit, port)
