@@ -316,7 +316,13 @@ func runGet(opts getOpts) error {
 		clientFiles[i] = client.FileEntry{Path: f.Path, Length: f.Length}
 	}
 
-	v1Hash, _ := hex.DecodeString(mag.InfoHashV1)
+	// A v2-only magnet has no v1 hash, which is fine; but if one is present it
+	// must be valid hex — reject a malformed value at the boundary rather than
+	// handing a truncated hash to the downloader.
+	v1Hash, err := hex.DecodeString(mag.InfoHashV1)
+	if err != nil {
+		return fmt.Errorf("invalid v1 info hash %q: %w", mag.InfoHashV1, err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

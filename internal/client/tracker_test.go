@@ -19,7 +19,7 @@ func TestUnpackPeers(t *testing.T) {
 		5, 6, 7, 8, 0x1f, 0x90, // 8080 = 0x1f90
 	}
 
-	addrs, err := unpackPeers(peers)
+	addrs, err := unpackPeers(peers, net.IPv4len)
 	if err != nil {
 		t.Fatalf("unpackPeers failed: %v", err)
 	}
@@ -35,10 +35,29 @@ func TestUnpackPeers(t *testing.T) {
 	}
 }
 
+func TestUnpackPeersIPv6(t *testing.T) {
+	t.Parallel()
+	// One IPv6 peer: [::1]:6881 — 16 address bytes + 2 port bytes.
+	peers := make([]byte, 0, 18)
+	peers = append(peers, net.ParseIP("::1").To16()...)
+	peers = append(peers, 0x1a, 0xe1) // 6881
+
+	addrs, err := unpackPeers(peers, net.IPv6len)
+	if err != nil {
+		t.Fatalf("unpackPeers (v6) failed: %v", err)
+	}
+	if len(addrs) != 1 {
+		t.Fatalf("expected 1 peer, got %d", len(addrs))
+	}
+	if addrs[0] != "[::1]:6881" {
+		t.Errorf("expected [::1]:6881, got %s", addrs[0])
+	}
+}
+
 func TestUnpackPeersInvalidLength(t *testing.T) {
 	t.Parallel()
 	peers := []byte{1, 2, 3, 4, 5} // 5 bytes, not a multiple of 6
-	_, err := unpackPeers(peers)
+	_, err := unpackPeers(peers, net.IPv4len)
 	if err == nil {
 		t.Error("expected error for invalid length")
 	}
