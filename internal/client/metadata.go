@@ -10,10 +10,19 @@ import (
 	wbencode "weightless/internal/bencode"
 )
 
+// maxMetadataSize bounds the info dictionary a peer may advertise via BEP 9.
+// metadata_size is attacker-controlled (it comes straight from the peer's
+// extended handshake), so cap it before allocating to avoid a memory-exhaustion
+// DoS. 16 MiB is far larger than any real torrent info dict.
+const maxMetadataSize = 16 << 20
+
 // FetchMetadata fetches the info dictionary from a peer using BEP 9 metadata exchange.
 func (p *PeerConn) FetchMetadata(ctx context.Context, infoHash []byte) ([]byte, error) {
-	if p.MetadataSize == 0 {
+	if p.MetadataSize <= 0 {
 		return nil, fmt.Errorf("peer did not provide metadata_size")
+	}
+	if p.MetadataSize > maxMetadataSize {
+		return nil, fmt.Errorf("metadata_size %d exceeds max %d", p.MetadataSize, maxMetadataSize)
 	}
 
 	numPieces := (p.MetadataSize + 16383) / 16384

@@ -1,5 +1,4 @@
 #!/bin/sh
-set -e
 
 # Restore the database from Litestream if it doesn't exist
 if [ ! -f /data/weightless.db ]; then
@@ -33,5 +32,7 @@ _term() {
 # Trap signals
 trap _term SIGTERM SIGINT
 
-# Wait for weightless to exit (or for trap to catch signal)
-wait "$TRACKER_PID"
+# Wait for weightless to exit, re-entering wait if interrupted by other child exits
+while kill -0 "$TRACKER_PID" 2>/dev/null; do
+  wait "$TRACKER_PID" 2>/dev/null || true
+done
