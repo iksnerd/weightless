@@ -75,6 +75,78 @@ func TestExtractPieceLayer(t *testing.T) {
 	}
 }
 
+// TestHybridGoldenVectors pins the v1+v2 info hashes for fixed inputs against
+// values independently verified by Transmission 4.1.2 (transmission-remote
+// --verify recomputed the v1 piece SHA-1s and the v2 block/Merkle piece-layer
+// from the raw bytes and reported 100% / no error). This guards the hybrid
+// Merkle construction — especially partial final pieces and non-power-of-two
+// piece counts — against silent regressions. See docs/personal/TODO.md.
+//
+// To regenerate after an intentional format change: rebuild `wl`, run
+// `wl create` on the same bytes, and re-verify with Transmission before
+// updating these constants.
+func TestHybridGoldenVectors(t *testing.T) {
+	t.Parallel()
+
+	uniform := make([]byte, 1_000_000) // 4 pieces @ 256 KiB, partial final piece
+	for i := range uniform {
+		uniform[i] = 'A'
+	}
+	pattern := make([]byte, 700_000) // 3 pieces @ 256 KiB (non-power-of-two count)
+	for i := range pattern {
+		pattern[i] = byte((i*31 + 7) & 255)
+	}
+
+	tests := []struct {
+		name     string
+		filename string
+		data     []byte
+		wantV1   string
+		wantV2   string
+	}{
+		{
+			name:     "uniform 1MB / 4 pieces",
+			filename: "data.bin",
+			data:     uniform,
+			wantV1:   "cc1614c7d81dc40154072a8af1394e66b4487eef",
+			wantV2:   "db4ca38f5db211c00c5f547b8846129934fb863bbf311373debfab0b31fc615d",
+		},
+		{
+			name:     "pattern 700KB / 3 pieces",
+			filename: "det.bin",
+			data:     pattern,
+			wantV1:   "017231f2fc53e409770efce1dc839fed8c98d704",
+			wantV2:   "6edff7059a3fb14c98d9985ec57e220e0ef1976d9e7912f2c5aad86b18089055",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := filepath.Join(dir, tt.filename)
+			if err := os.WriteFile(path, tt.data, 0644); err != nil {
+				t.Fatal(err)
+			}
+			result, err := Create(CreateOptions{
+				Path:        path,
+				Name:        tt.filename,
+				PieceLength: 256 * 1024,
+				AnnounceURL: "http://localhost:8080/announce",
+			})
+			if err != nil {
+				t.Fatalf("Create failed: %v", err)
+			}
+			if result.InfoHashV1Hex != tt.wantV1 {
+				t.Errorf("v1 hash = %s, want %s", result.InfoHashV1Hex, tt.wantV1)
+			}
+			if result.InfoHashHex != tt.wantV2 {
+				t.Errorf("v2 hash = %s, want %s", result.InfoHashHex, tt.wantV2)
+			}
+		})
+	}
+}
+
 func TestCreateSingleFileHybrid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.dat")
