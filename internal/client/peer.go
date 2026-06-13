@@ -13,9 +13,20 @@ import (
 	wbencode "weightless/internal/bencode"
 )
 
-// Extension ID mapping for BEP 10
+// Extension names for BEP 10. Peers send extended messages using the local
+// IDs WE advertise in our handshake `m` dict, so the constants below are both
+// the advertised names and (via localMetadataID/localPexID) the IDs we expect
+// inbound messages to carry.
 const (
-	ExtMetadata = "ut_metadata"
+	ExtMetadata = "ut_metadata" // BEP 9 metadata exchange
+	ExtPex      = "ut_pex"      // BEP 11 peer exchange
+)
+
+// Local extension IDs we advertise in sendExtendedHandshake. A peer that
+// supports an extension addresses its messages to us using these IDs.
+const (
+	localMetadataID = 1
+	localPexID      = 2
 )
 
 // BEP 3 wire constants. The handshake is *exactly* 68 bytes: 1 length byte +
@@ -51,6 +62,11 @@ type PeerConn struct {
 	// BEP 10 Extension data
 	PeerExtensions map[string]int
 	MetadataSize   int
+
+	// pexPeers buffers addresses harvested from inbound ut_pex (BEP 11)
+	// messages. Owned by the single worker goroutine driving this conn — the
+	// read loop appends, the same worker drains via DrainPexPeers. No lock.
+	pexPeers []string
 }
 
 // Connect establishes a TCP connection to the given address.
@@ -223,7 +239,8 @@ func (p *PeerConn) RequestMetadata(piece int) error {
 func (p *PeerConn) sendExtendedHandshake() error {
 	m := map[string]interface{}{
 		"m": map[string]int{
-			ExtMetadata: 1, // We map ut_metadata to local ID 1
+			ExtMetadata: localMetadataID, // ut_metadata → local ID 1
+			ExtPex:      localPexID,      // ut_pex     → local ID 2
 		},
 	}
 	payloadBytes, err := bencode.EncodeBytes(m)
@@ -265,4 +282,86 @@ func (p *PeerConn) WriteMessage(m *Message) error {
 
 func (p *PeerConn) Close() {
 	p.conn.Close()
+}
+
+// handlePexMessage parses the body of an inbound ut_pex (BEP 11) extended
+// message and buffers any discovered peers for later draining. body is the
+// extended-message payload AFTER the leading ext-id byte.
+//
+// Malformed PEX is silently ignored: peer exchange is best-effort and must
+// never break an in-flight piece download. Strict recognition lives in
+// parsePexPeers (unit-tested); the runtime path just discards what it can't read.
+func (p *PeerConn) handlePexMessage(body []byte) {
+	peers, err := parsePexPeers(body)
+	if err != nil {
+		return
+	}
+	p.pexPeers = append(p.pexPeers, peers...)
+}
+
+// DrainPexPeers returns the peers harvested from ut_pex messages so far and
+// clears the buffer. Called by the owning worker between piece downloads.
+func (p *PeerConn) DrainPexPeers() []string {
+	out := p.pexPeers
+	p.pexPeers = nil
+	return out
+}
+
+// parsePexPeers recognizes a ut_pex (BEP 11) message dict and returns the
+// peers in its `added` (compact IPv4, 6 bytes each) and `added6` (compact
+// IPv6, 18 bytes each) fields. `dropped`, flags, and any other keys are
+// ignored — v0 only grows the pool, never shrinks it.
+//
+// LangSec: validate the bencode structure against PeerMessageLimits before
+// decoding, and reject compact lists whose length isn't a clean multiple of
+// the peer-entry size.
+func parsePexPeers(dict []byte) ([]string, error) {
+	if err := wbencode.Validate(dict, wbencode.PeerMessageLimits); err != nil {
+		return nil, fmt.Errorf("validate pex message: %w", err)
+	}
+
+	var msg struct {
+		Added  []byte `bencode:"added"`
+		Added6 []byte `bencode:"added6"`
+	}
+	if err := bencode.DecodeBytes(dict, &msg); err != nil {
+		return nil, fmt.Errorf("decode pex message: %w", err)
+	}
+
+	var addrs []string
+	if len(msg.Added) > 0 {
+		v4, err := unpackPeers(msg.Added, net.IPv4len)
+		if err != nil {
+			return nil, fmt.Errorf("pex added: %w", err)
+		}
+		addrs = append(addrs, v4...)
+	}
+	if len(msg.Added6) > 0 {
+		v6, err := unpackPeers(msg.Added6, net.IPv6len)
+		if err != nil {
+			return nil, fmt.Errorf("pex added6: %w", err)
+		}
+		addrs = append(addrs, v6...)
+	}
+
+	// Drop unconnectable entries. Real clients (e.g. Transmission) advertise
+	// peers with port 0 or an unspecified IP; dialing them only wastes a worker.
+	out := addrs[:0]
+	for _, a := range addrs {
+		if connectableAddr(a) {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
+// connectableAddr reports whether addr is worth dialing: a parseable host:port
+// with a non-zero port and a specified (non-0.0.0.0/::) IP.
+func connectableAddr(addr string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "0" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && !ip.IsUnspecified()
 }
