@@ -1,0 +1,7 @@
+# code-nexus ignore rules (gitignore-style).
+# Exclude Go test files from the code graph so call-graph / impact / dead-code
+# analysis stays focused on production code. Tests still run via `go test`.
+*_test.go
+
+# Generated/local artifacts that aren't source.
+testdata/
