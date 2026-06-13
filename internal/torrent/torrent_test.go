@@ -1,6 +1,7 @@
 package torrent
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -144,6 +145,56 @@ func TestHybridGoldenVectors(t *testing.T) {
 				t.Errorf("v2 hash = %s, want %s", result.InfoHashHex, tt.wantV2)
 			}
 		})
+	}
+}
+
+func TestCreateStream(t *testing.T) {
+	t.Parallel()
+
+	// Same fixed input as the uniform golden vector — proves the streaming-hash
+	// path is byte-identical to the on-disk path AND matches Transmission.
+	data := make([]byte, 1_000_000)
+	for i := range data {
+		data[i] = 'A'
+	}
+	const (
+		wantV1 = "cc1614c7d81dc40154072a8af1394e66b4487eef"
+		wantV2 = "db4ca38f5db211c00c5f547b8846129934fb863bbf311373debfab0b31fc615d"
+	)
+	origin := "https://huggingface.co/org/repo/resolve/main/data.bin"
+
+	result, err := CreateStream(CreateOptions{
+		PieceLength: 256 * 1024,
+		AnnounceURL: "http://localhost:8080/announce",
+		WebSeeds:    []string{origin},
+	}, bytes.NewReader(data), int64(len(data)), "data.bin")
+	if err != nil {
+		t.Fatalf("CreateStream failed: %v", err)
+	}
+	if result.InfoHashV1Hex != wantV1 {
+		t.Errorf("v1 hash = %s, want %s", result.InfoHashV1Hex, wantV1)
+	}
+	if result.InfoHashHex != wantV2 {
+		t.Errorf("v2 hash = %s, want %s", result.InfoHashHex, wantV2)
+	}
+
+	// The origin must be carried as a web seed.
+	var meta map[string]interface{}
+	if err := bencode.DecodeBytes(result.TorrentBytes, &meta); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok := meta["url-list"].([]interface{})
+	if !ok || len(raw) != 1 || raw[0].(string) != origin {
+		t.Errorf("url-list = %v, want [%s]", meta["url-list"], origin)
+	}
+
+	// Bad inputs are rejected.
+	base := CreateOptions{PieceLength: 256 * 1024, AnnounceURL: "http://localhost:8080/announce"}
+	if _, err := CreateStream(base, bytes.NewReader(data), 0, "x"); err == nil {
+		t.Error("expected error for non-positive size")
+	}
+	if _, err := CreateStream(base, bytes.NewReader(data), 10, ""); err == nil {
+		t.Error("expected error for empty name")
 	}
 }
 

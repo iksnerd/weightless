@@ -66,11 +66,8 @@ func Create(opts CreateOptions) (*CreateResult, error) {
 	if opts.PieceLength < MinPieceLength || !isPowerOfTwo(opts.PieceLength) {
 		return nil, fmt.Errorf("piece length must be a power of 2 and >= %d, got %d", MinPieceLength, opts.PieceLength)
 	}
-	for _, ws := range opts.WebSeeds {
-		u, err := url.Parse(ws)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return nil, fmt.Errorf("web seed must be an absolute http(s) URL, got %q", ws)
-		}
+	if err := validateWebSeeds(opts.WebSeeds); err != nil {
+		return nil, err
 	}
 
 	info, err := os.Stat(opts.Path)
@@ -95,6 +92,59 @@ func Create(opts CreateOptions) (*CreateResult, error) {
 		return nil, err
 	}
 
+	return finalize(opts, infoDict, pieceLayers)
+}
+
+// validateWebSeeds checks each web seed is an absolute http(s) URL.
+func validateWebSeeds(seeds []string) error {
+	for _, ws := range seeds {
+		u, err := url.Parse(ws)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("web seed must be an absolute http(s) URL, got %q", ws)
+		}
+	}
+	return nil
+}
+
+// CreateStream builds a single-file hybrid torrent by hashing an io.Reader of
+// known size — without persisting the data locally. Used by `wl create --stream`
+// to torrentify a remote origin (e.g. a Hugging Face / Kaggle URL): the bytes
+// are read once to compute hashes, and the origin URL is carried as a web seed.
+func CreateStream(opts CreateOptions, r io.Reader, size int64, name string) (*CreateResult, error) {
+	if opts.PieceLength == 0 {
+		opts.PieceLength = DefaultPieceLength
+	}
+	if opts.AnnounceURL == "" {
+		return nil, fmt.Errorf("announce URL is required")
+	}
+	if opts.PieceLength < MinPieceLength || !isPowerOfTwo(opts.PieceLength) {
+		return nil, fmt.Errorf("piece length must be a power of 2 and >= %d, got %d", MinPieceLength, opts.PieceLength)
+	}
+	if size <= 0 {
+		return nil, fmt.Errorf("stream size must be known and positive, got %d", size)
+	}
+	if name == "" {
+		return nil, fmt.Errorf("stream name is required")
+	}
+	if err := validateWebSeeds(opts.WebSeeds); err != nil {
+		return nil, err
+	}
+
+	fr, err := hashReaderHybrid(r, size, opts.PieceLength)
+	if err != nil {
+		return nil, fmt.Errorf("hash stream: %w", err)
+	}
+
+	infoDict := newOrderedDict()
+	pieceLayers := make(map[string]string)
+	if err := populateSingleFileInfo(infoDict, pieceLayers, opts, fr, name); err != nil {
+		return nil, err
+	}
+	return finalize(opts, infoDict, pieceLayers)
+}
+
+// finalize assembles the outer metainfo dict and computes the result.
+func finalize(opts CreateOptions, infoDict *orderedDict, pieceLayers map[string]string) (*CreateResult, error) {
 	infoBytes, err := bencode.EncodeBytes(infoDict)
 	if err != nil {
 		return nil, fmt.Errorf("bencode info dict: %w", err)
@@ -149,10 +199,14 @@ func buildSingleFileHybrid(infoDict *orderedDict, pieceLayers map[string]string,
 	if err != nil {
 		return err
 	}
+	return populateSingleFileInfo(infoDict, pieceLayers, opts, fr, filepath.Base(opts.Path))
+}
 
+// populateSingleFileInfo fills the info dict from an already-computed fileResult.
+// Shared by the on-disk (buildSingleFileHybrid) and streaming (CreateStream) paths.
+func populateSingleFileInfo(infoDict *orderedDict, pieceLayers map[string]string, opts CreateOptions, fr *fileResult, filename string) error {
 	// For single-file hybrid torrents, the file tree key and info.name must
 	// both match the actual filename so clients can locate the file on disk.
-	filename := filepath.Base(opts.Path)
 	fileTree := map[string]interface{}{
 		filename: map[string]interface{}{
 			"": fr.v2Entry,
@@ -348,8 +402,13 @@ func hashFileHybrid(path string, pieceLen int) (*fileResult, error) {
 		return nil, err
 	}
 
-	size := info.Size()
+	return hashReaderHybrid(f, info.Size(), pieceLen)
+}
 
+// hashReaderHybrid computes the hybrid v1+v2 hashes for a single file of known
+// size streamed from r. r is read exactly once (no seeking, nothing persisted),
+// so it works for an HTTP body just as well as a local file.
+func hashReaderHybrid(r io.Reader, size int64, pieceLen int) (*fileResult, error) {
 	if size == 0 {
 		return &fileResult{
 			size:    0,
@@ -357,7 +416,7 @@ func hashFileHybrid(path string, pieceLen int) (*fileResult, error) {
 		}, nil
 	}
 
-	// Read file in 16KiB blocks for v2 Merkle tree
+	// Read in 16KiB blocks for the v2 Merkle tree
 	// Simultaneously compute v1 SHA-1 piece hashes
 	buf := make([]byte, BlockSize)
 	var blockHashes [][32]byte
@@ -366,7 +425,7 @@ func hashFileHybrid(path string, pieceLen int) (*fileResult, error) {
 	bytesInPiece := 0
 
 	for {
-		n, err := io.ReadFull(f, buf)
+		n, err := io.ReadFull(r, buf)
 		if n > 0 {
 			// v2: SHA-256 of each 16KiB block
 			blockHashes = append(blockHashes, sha256.Sum256(buf[:n]))
