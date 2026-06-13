@@ -627,11 +627,12 @@ func TestGetTrackerNotFound(t *testing.T) {
 		magnetURI:  "magnet:?xt=urn:btih:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef&dn=missing",
 		trackerURL: server.URL,
 	})
+	// Registry 404 → BEP 9 fallback → announce also 404s → clean failure.
 	if err == nil {
-		t.Error("expected error for 404 response")
+		t.Fatal("expected error when neither registry nor peers can provide metadata")
 	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("expected 'not found' in error, got: %v", err)
+	if !strings.Contains(err.Error(), "peers") && !strings.Contains(err.Error(), "404") {
+		t.Errorf("expected a metadata-acquisition error, got: %v", err)
 	}
 }
 

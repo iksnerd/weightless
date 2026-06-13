@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -357,16 +358,15 @@ func runGet(opts getOpts) error {
 		}
 	}
 
-	// Fetch .torrent from tracker API
-	torrentBytes, err := fetchTorrent(trackerBase, hash)
-	if err != nil {
-		return fmt.Errorf("fetch torrent: %w", err)
-	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// Decode the torrent metadata
-	meta, err := torrent.Parse(torrentBytes)
+	// Metadata: try the registry first, then fall back to BEP 9 peer exchange
+	// (so a magnet resolves even when the tracker has no registry entry).
+	announceURL := buildAnnounceURL(trackerBase, opts.userID, opts.secret)
+	torrentBytes, meta, err := acquireMetadata(ctx, trackerBase, announceURL, mag)
 	if err != nil {
-		return fmt.Errorf("decode torrent: %w", err)
+		return err
 	}
 
 	// Determine output directory
@@ -408,9 +408,6 @@ func runGet(opts getOpts) error {
 		return fmt.Errorf("invalid v1 info hash %q: %w", mag.InfoHashV1, err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	return client.DownloadMVP(ctx, client.DownloadOptions{
 		Meta: client.TorrentMeta{
 			Name:        meta.Name,
@@ -421,9 +418,97 @@ func runGet(opts getOpts) error {
 			Pieces:      meta.Pieces,
 			Files:       clientFiles,
 		},
-		TrackerURL: buildAnnounceURL(trackerBase, opts.userID, opts.secret),
+		TrackerURL: announceURL,
 		OutputDir:  outDir,
 	})
+}
+
+// acquireMetadata returns the torrent bytes and parsed metadata, trying the
+// registry API first and falling back to BEP 9 peer metadata exchange when the
+// registry has no entry for the hash.
+func acquireMetadata(ctx context.Context, trackerBase, announceURL string, mag torrent.Magnet) ([]byte, torrent.TorrentMeta, error) {
+	if tb, err := fetchTorrent(trackerBase, mag.BestHash()); err == nil {
+		if meta, perr := torrent.Parse(tb); perr == nil {
+			return tb, meta, nil
+		}
+	}
+
+	// Registry miss — fall back to peers. BEP 9 ut_metadata verifies against the
+	// v1 (SHA-1) info hash, so we need one.
+	fmt.Println("  registry has no entry; fetching metadata from peers (BEP 9)...")
+	if mag.InfoHashV1 == "" {
+		return nil, torrent.TorrentMeta{}, fmt.Errorf("not in registry and magnet has no v1 hash; cannot fetch metadata from peers")
+	}
+	v1Hash, err := hex.DecodeString(mag.InfoHashV1)
+	if err != nil || len(v1Hash) != 20 {
+		return nil, torrent.TorrentMeta{}, fmt.Errorf("invalid v1 info hash %q", mag.InfoHashV1)
+	}
+
+	peerID := newPeerID()
+	addrs, err := client.Announce(ctx, announceURL, string(v1Hash), peerID, 6881, 0)
+	if err != nil {
+		return nil, torrent.TorrentMeta{}, fmt.Errorf("announce for peers: %w", err)
+	}
+	if len(addrs) == 0 {
+		return nil, torrent.TorrentMeta{}, fmt.Errorf("no peers available to fetch metadata from")
+	}
+
+	infoBytes, err := fetchMetadataFromPeers(ctx, addrs, v1Hash, peerID)
+	if err != nil {
+		return nil, torrent.TorrentMeta{}, err
+	}
+	meta, err := torrent.ParseInfo(infoBytes)
+	if err != nil {
+		return nil, torrent.TorrentMeta{}, fmt.Errorf("parse peer metadata: %w", err)
+	}
+	tb, err := torrent.BuildMetainfo(infoBytes, announceURL)
+	if err != nil {
+		return nil, torrent.TorrentMeta{}, fmt.Errorf("rebuild torrent: %w", err)
+	}
+	return tb, meta, nil
+}
+
+// fetchMetadataFromPeers connects to peers in turn and returns the first info
+// dict successfully fetched via BEP 9.
+func fetchMetadataFromPeers(ctx context.Context, addrs []string, v1Hash []byte, peerID string) ([]byte, error) {
+	var lastErr error
+	for _, addr := range addrs {
+		p, err := client.Connect(ctx, addr)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if err := p.Handshake(ctx, v1Hash, peerID); err != nil {
+			p.Close()
+			lastErr = err
+			continue
+		}
+		if p.MetadataSize <= 0 {
+			p.Close()
+			lastErr = fmt.Errorf("%s did not advertise metadata_size", addr)
+			continue
+		}
+		data, err := p.FetchMetadata(ctx, v1Hash)
+		p.Close()
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("no peer served metadata (%d tried): %w", len(addrs), lastErr)
+}
+
+// newPeerID returns a 20-byte BEP 20 peer id.
+func newPeerID() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		return "-WL0020-aaaaaaaaaaaa"
+	}
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	for i := range b {
+		b[i] = charset[int(b[i])%len(charset)]
+	}
+	return "-WL0020-" + string(b)
 }
 
 // buildAnnounceURL constructs the announce URL, optionally with a signed passkey path.

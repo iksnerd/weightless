@@ -148,6 +148,64 @@ func TestHybridGoldenVectors(t *testing.T) {
 	}
 }
 
+func TestParseInfoRoundTrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rt.bin")
+	data := make([]byte, 300000)
+	for i := range data {
+		data[i] = byte(i * 13)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Create(CreateOptions{Path: path, Name: "rt.bin", PieceLength: 256 * 1024, AnnounceURL: "http://t/announce"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := Parse(result.TorrentBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Extract the exact info-dict bytes (what a peer would serve over BEP 9).
+	var raw map[string]bencode.RawMessage
+	if err := bencode.DecodeBytes(result.TorrentBytes, &raw); err != nil {
+		t.Fatal(err)
+	}
+	infoBytes := []byte(raw["info"])
+	if sha256.Sum256(infoBytes) != result.InfoHash {
+		t.Fatal("extracted info bytes do not reproduce the v2 info hash")
+	}
+
+	// ParseInfo on the bare info dict must match Parse on the full torrent.
+	fromInfo, err := ParseInfo(infoBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromInfo.Name != full.Name || fromInfo.PieceLength != full.PieceLength ||
+		fromInfo.PieceCount != full.PieceCount || fromInfo.TotalSize != full.TotalSize ||
+		len(fromInfo.Files) != len(full.Files) || !bytes.Equal(fromInfo.Pieces, full.Pieces) {
+		t.Errorf("ParseInfo != Parse:\n got %+v\nwant %+v", fromInfo, full)
+	}
+
+	// BuildMetainfo must round-trip and preserve the info hash.
+	tb, err := BuildMetainfo(infoBytes, "http://t/announce")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw2 map[string]bencode.RawMessage
+	if err := bencode.DecodeBytes(tb, &raw2); err != nil {
+		t.Fatal(err)
+	}
+	if sha256.Sum256([]byte(raw2["info"])) != result.InfoHash {
+		t.Error("BuildMetainfo changed the info hash")
+	}
+	if rebuilt, err := Parse(tb); err != nil || rebuilt.TotalSize != full.TotalSize {
+		t.Errorf("BuildMetainfo round-trip failed: %v", err)
+	}
+}
+
 func TestCreateStream(t *testing.T) {
 	t.Parallel()
 

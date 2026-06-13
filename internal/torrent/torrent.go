@@ -601,3 +601,16 @@ func (d *orderedDict) MarshalBencode() ([]byte, error) {
 	buf = append(buf, 'e')
 	return buf, nil
 }
+
+// BuildMetainfo wraps a bare info dict (e.g. fetched from a peer via BEP 9) into
+// a minimal .torrent metainfo so it can be saved to disk. infoData must be the
+// exact bencoded info dict — it is embedded verbatim so the info hash is
+// preserved. announce is optional.
+func BuildMetainfo(infoData []byte, announce string) ([]byte, error) {
+	m := newOrderedDict()
+	if announce != "" {
+		m.set("announce", announce)
+	}
+	m.set("info", bencode.RawMessage(infoData))
+	return bencode.EncodeBytes(m)
+}
