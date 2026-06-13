@@ -2,11 +2,34 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"testing"
 
 	"github.com/zeebo/bencode"
 )
+
+func TestFetchMetadataRejectsBadSize(t *testing.T) {
+	t.Parallel()
+	// The size guards run before any network I/O, so a bare PeerConn is enough.
+	tests := []struct {
+		name string
+		size int
+	}{
+		{"zero", 0},
+		{"negative", -1},
+		{"too large", maxMetadataSize + 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := &PeerConn{MetadataSize: tt.size}
+			if _, err := p.FetchMetadata(context.Background(), make([]byte, 20)); err == nil {
+				t.Fatalf("FetchMetadata(size=%d) = nil error, want rejection", tt.size)
+			}
+		})
+	}
+}
 
 func TestFindBencodeEnd(t *testing.T) {
 	t.Parallel()
