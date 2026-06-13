@@ -63,29 +63,24 @@ func DownloadMVP(ctx context.Context, opts DownloadOptions) error {
 	return nil
 }
 
-// connectToAny tries each address until one succeeds handshake.
-func connectToAny(ctx context.Context, addrs []string, infoHash []byte, peerID string) (*PeerConn, string, error) {
-	var lastErr error
-	for _, addr := range addrs {
-		p, err := Connect(ctx, addr)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if err := p.Handshake(ctx, infoHash, peerID); err != nil {
-			p.Close()
-			lastErr = err
-			continue
-		}
-		// Send interested immediately after handshake
-		if err := p.WriteMessage(&Message{ID: MsgInterested}); err != nil {
-			p.Close()
-			lastErr = err
-			continue
-		}
-		return p, addr, nil
+// dialAndHandshake connects to a single peer, performs the BEP 3/10 handshake,
+// and sends our initial "interested". On any failure the connection is closed
+// and the error returned so the caller can move on to the next address.
+func dialAndHandshake(ctx context.Context, addr string, infoHash []byte, peerID string) (*PeerConn, error) {
+	p, err := Connect(ctx, addr)
+	if err != nil {
+		return nil, err
 	}
-	return nil, "", fmt.Errorf("all peers failed: %w", lastErr)
+	if err := p.Handshake(ctx, infoHash, peerID); err != nil {
+		p.Close()
+		return nil, err
+	}
+	// Send interested immediately after handshake.
+	if err := p.WriteMessage(&Message{ID: MsgInterested}); err != nil {
+		p.Close()
+		return nil, err
+	}
+	return p, nil
 }
 
 // downloadPiece downloads and verifies a single piece over an existing connection.
@@ -155,7 +150,16 @@ func downloadPiece(ctx context.Context, p *PeerConn, index int, size int, expect
 				}
 			}
 
-		case MsgExtended, MsgBitfield, MsgHave:
+		case MsgExtended:
+			// BEP 11: a peer addresses ut_pex messages to us using the local
+			// ID we advertised (localPexID). Harvest discovered peers; the
+			// owning worker drains them after this piece finishes.
+			if len(msg.Payload) > 0 && msg.Payload[0] == localPexID {
+				p.handlePexMessage(msg.Payload[1:])
+			}
+			continue
+
+		case MsgBitfield, MsgHave:
 			continue
 		}
 	}
