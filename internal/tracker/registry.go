@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -89,7 +90,7 @@ func HandleAPI(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		if registryKey != "" {
-			if r.Header.Get("X-Weightless-Key") != registryKey {
+			if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Weightless-Key")), []byte(registryKey)) != 1 {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -144,7 +145,7 @@ func HandleAPI(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodDelete:
 		if registryKey != "" {
-			if r.Header.Get("X-Weightless-Key") != registryKey {
+			if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Weightless-Key")), []byte(registryKey)) != 1 {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
