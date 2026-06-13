@@ -64,6 +64,8 @@ func main() {
 		category := createCmd.String("category", "", "Category (e.g. models, datasets)")
 		tags := createCmd.String("tags", "", "Comma-separated tags")
 		comment := createCmd.String("comment", "", "Optional comment in the torrent file")
+		var webseeds stringSlice
+		createCmd.Var(&webseeds, "webseed", "BEP 19 web seed URL (HTTP origin fallback); repeatable")
 		createCmd.Parse(os.Args[2:])
 
 		path := createCmd.Arg(0)
@@ -86,6 +88,7 @@ func main() {
 			category:    *category,
 			tags:        *tags,
 			comment:     *comment,
+			webseeds:    webseeds,
 		}
 
 		if err := runCreate(opts); err != nil {
@@ -135,6 +138,16 @@ type createOpts struct {
 	category    string
 	tags        string
 	comment     string
+	webseeds    []string
+}
+
+// stringSlice is a repeatable string flag (e.g. --webseed a --webseed b).
+type stringSlice []string
+
+func (s *stringSlice) String() string { return strings.Join(*s, ",") }
+func (s *stringSlice) Set(v string) error {
+	*s = append(*s, v)
+	return nil
 }
 
 func runCreate(opts createOpts) error {
@@ -160,6 +173,7 @@ func runCreate(opts createOpts) error {
 		Comment:     opts.comment,
 		Source:      envOr("WL_SOURCE", ""),
 		CreatedBy:   envOr("WL_CREATED_BY", ""),
+		WebSeeds:    opts.webseeds,
 	})
 	if err != nil {
 		return fmt.Errorf("create torrent: %w", err)
