@@ -26,6 +26,8 @@ profile.cov
 
 # Generated test data
 *.bin
+# Root throwaway e2e artifacts only — NOT Go fixture dirs like internal/**/testdata/
+/testdata/
 
 # IDE
 .idea/

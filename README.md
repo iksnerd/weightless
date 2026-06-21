@@ -240,6 +240,15 @@ docker run -p 8080:8080 weightless
 gcloud run deploy weightless --source .
 ```
 
+## Documentation
+
+- [WHITEPAPER.md](docs/WHITEPAPER.md) — the systems argument: what Weightless is and why the design is sound.
+- [RFC-0001](docs/RFC-0001-torrent-signing.md) — proposed Ed25519 hybrid torrent signing scheme (provenance).
+- [API_SPEC.md](docs/API_SPEC.md) — full tracker and registry endpoint reference.
+- [CLI_SPEC.md](docs/CLI_SPEC.md) — `wl` command reference.
+- [PASSKEY_AUTH.md](docs/PASSKEY_AUTH.md) — HMAC passkey scheme.
+- [USAGE_SYNC_SPEC.md](docs/USAGE_SYNC_SPEC.md) — tracker-to-Hub usage-sync contract.
+
 ## License
 
 MIT
