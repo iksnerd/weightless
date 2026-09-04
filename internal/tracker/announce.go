@@ -45,10 +45,6 @@ func authenticatePasskey(w http.ResponseWriter, r *http.Request) (string, bool) 
 }
 
 func HandleAnnounce(w http.ResponseWriter, r *http.Request) {
-	// In serverless environments, background goroutines might not run.
-	// We run a probabilistic prune on incoming requests.
-	MaybePrunePeers()
-
 	// Auth — separate concern from input recognition (path-based, not query).
 	userID, ok := authenticatePasskey(w, r)
 	if !ok {
@@ -109,7 +105,14 @@ func executeAnnounce(w http.ResponseWriter, r *http.Request, userID string, p An
 			if oldPeer != nil {
 				deltaUp := p.Uploaded - oldPeer.Uploaded
 				deltaDown := p.Downloaded - oldPeer.Downloaded
-				// Sanity check: prevent negative deltas if client resets counters
+				// Clamp each delta independently: a client that reset one
+				// counter must not produce a negative credit on the other.
+				if deltaUp < 0 {
+					deltaUp = 0
+				}
+				if deltaDown < 0 {
+					deltaDown = 0
+				}
 				if deltaUp > 0 || deltaDown > 0 {
 					State.TrackUsage(userID, deltaUp, deltaDown)
 				}
@@ -124,9 +127,10 @@ func executeAnnounce(w http.ResponseWriter, r *http.Request, userID string, p An
 			Uploaded:   p.Uploaded,
 		})
 
-		// Track completions for scrape (fire-and-forget)
+		// Track completions for scrape (fire-and-forget). Hybrid clients
+		// announce the v1 hash, which lives in v1_info_hash — match both.
 		if p.Event == EventCompleted {
-			if _, err := DB.Exec("UPDATE registry SET completions = completions + 1 WHERE info_hash = ?", hash); err != nil {
+			if _, err := DB.Exec("UPDATE registry SET completions = completions + 1 WHERE info_hash = ? OR v1_info_hash = ?", hash, hash); err != nil {
 				log.Printf("Error updating completions: %v", err)
 			}
 		}

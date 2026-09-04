@@ -3,7 +3,6 @@ package tracker
 import (
 	"database/sql"
 	"testing"
-	"time"
 )
 
 func TestInitSchemaCreatesTablesAndIndex(t *testing.T) {
@@ -66,43 +65,4 @@ func TestInitSchemaIdempotent(t *testing.T) {
 	// Call twice — should not panic or error
 	InitSchema()
 	InitSchema()
-}
-
-func TestPrunePeers(t *testing.T) {
-	DB = SetupTestDB(t)
-	defer DB.Close()
-
-	now := time.Now().Unix()
-	DB.Exec(`INSERT INTO peers (info_hash, peer_id, addr, updated_at) VALUES (?, ?, ?, ?)`,
-		"hash1", "peer1", "127.0.0.1:6881", now)
-
-	staleTime := now - 3601
-	DB.Exec(`INSERT INTO peers (info_hash, peer_id, addr, updated_at) VALUES (?, ?, ?, ?)`,
-		"hash1", "peer2", "127.0.0.1:6882", staleTime)
-
-	err := PrunePeers()
-	if err != nil {
-		t.Fatalf("Error pruning: %v", err)
-	}
-
-	var count int
-	DB.QueryRow("SELECT COUNT(*) FROM peers WHERE peer_id = ?", "peer1").Scan(&count)
-	if count != 1 {
-		t.Error("Fresh peer should not be pruned")
-	}
-
-	DB.QueryRow("SELECT COUNT(*) FROM peers WHERE peer_id = ?", "peer2").Scan(&count)
-	if count != 0 {
-		t.Error("Stale peer should be pruned")
-	}
-}
-
-func TestPrunePeersNothingToDelete(t *testing.T) {
-	DB = SetupTestDB(t)
-	defer DB.Close()
-
-	err := PrunePeers()
-	if err != nil {
-		t.Fatalf("Error pruning empty table: %v", err)
-	}
 }

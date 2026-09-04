@@ -2,9 +2,11 @@ package tracker
 
 import (
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -199,5 +201,66 @@ func TestScrapeBlockedHash(t *testing.T) {
 	files := resp["files"].(map[string]interface{})
 	if len(files) != 0 {
 		t.Errorf("Blocked hash should be skipped, got %d entries", len(files))
+	}
+}
+
+func TestScrapeCapsHashCount(t *testing.T) {
+	DB = setupTest(t)
+	defer DB.Close()
+	t.Setenv("OPEN_TRACKER", "true")
+
+	// maxScrapeHashes+1 distinct, well-formed (32-byte) hashes. Under
+	// OPEN_TRACKER every one would be answered, so the cap is what limits
+	// the response.
+	var parts []string
+	for i := 0; i < maxScrapeHashes+1; i++ {
+		h := fmt.Sprintf("%064x", i+1)
+		bin, _ := hex.DecodeString(h)
+		parts = append(parts, "info_hash="+url.QueryEscape(string(bin)))
+	}
+	req := httptest.NewRequest("GET", "/scrape?"+strings.Join(parts, "&"), nil)
+	w := httptest.NewRecorder()
+	HandleScrape(w, req)
+
+	var resp map[string]interface{}
+	if err := bencode.DecodeString(w.Body.String(), &resp); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	files := resp["files"].(map[string]interface{})
+	if len(files) != maxScrapeHashes {
+		t.Errorf("Expected %d file entries (extras ignored), got %d", maxScrapeHashes, len(files))
+	}
+	// The extra hash (last in the query) must be the one dropped.
+	last, _ := hex.DecodeString(fmt.Sprintf("%064x", maxScrapeHashes+1))
+	if _, ok := files[string(last)]; ok {
+		t.Error("hash beyond the cap should have been ignored")
+	}
+}
+
+func TestScrapeOpenTrackerUnregisteredHash(t *testing.T) {
+	DB = setupTest(t)
+	defer DB.Close()
+	t.Setenv("OPEN_TRACKER", "true")
+
+	unknownHex := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	bin, _ := hex.DecodeString(unknownHex)
+	State.UpdatePeer(unknownHex, "s1", &Peer{Addr: "1.2.3.4:6881", UpdatedAt: time.Now().Unix(), Left: 0})
+
+	req := httptest.NewRequest("GET", "/scrape?info_hash="+url.QueryEscape(string(bin)), nil)
+	w := httptest.NewRecorder()
+	HandleScrape(w, req)
+
+	var resp map[string]interface{}
+	bencode.DecodeString(w.Body.String(), &resp)
+	files := resp["files"].(map[string]interface{})
+	stats, ok := files[string(bin)].(map[string]interface{})
+	if !ok {
+		t.Fatal("OPEN_TRACKER should answer for unregistered hashes")
+	}
+	if v, _ := stats["downloaded"].(int64); v != 0 {
+		t.Errorf("Expected downloaded=0 for unregistered hash, got %v", stats["downloaded"])
+	}
+	if v, _ := stats["complete"].(int64); v != 1 {
+		t.Errorf("Expected complete=1, got %v", stats["complete"])
 	}
 }

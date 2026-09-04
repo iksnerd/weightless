@@ -3,6 +3,7 @@ package tracker
 import (
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -76,9 +77,10 @@ func (rl *RateLimiter) LimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		if !rl.Allow(ip) {
-			// For trackers, we return a 200 with a bencoded failure for /announce,
-			// but for API we return a standard 429.
-			if r.URL.Path == "/announce" {
+			// For trackers, we return a 200 with a bencoded failure for /announce
+			// (including passkey paths like /announce/ID.SIG), but for API we
+			// return a standard 429.
+			if strings.HasPrefix(r.URL.Path, "/announce") {
 				TrackerError(w, "Rate limit exceeded. Please slow down.")
 			} else {
 				http.Error(w, "Too Many Requests", http.StatusTooManyRequests)

@@ -100,8 +100,8 @@ func TestIndexHandler(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d", w.Code)
 	}
-	if w.Body.String() != "Weightless Tracker v1.0" {
-		t.Errorf("Unexpected response: %s", w.Body.String())
+	if want := "Weightless Tracker " + Version; w.Body.String() != want {
+		t.Errorf("Unexpected response: got %q, want %q", w.Body.String(), want)
 	}
 }
 

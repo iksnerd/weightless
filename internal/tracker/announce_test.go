@@ -41,7 +41,6 @@ func buildAnnounceURL(hashHex, peerID, port string, extra ...string) string {
 func setupTest(t *testing.T) *sql.DB {
 	t.Helper()
 	DB = SetupTestDB(t)
-	disablePrune = true
 	// Clear and re-init in-memory state
 	State.mu.Lock()
 	State.Peers = make(map[string]map[string]*Peer)
@@ -487,6 +486,138 @@ func TestAnnounceCompletedEvent(t *testing.T) {
 	}
 }
 
+func TestAnnounceCompletedEventV1Hash(t *testing.T) {
+	db := setupTest(t)
+	defer db.Close()
+
+	// Hybrid torrent: registry keys on the v2 hash, v1 hash in v1_info_hash.
+	// Real clients announce the v1 hash, so completions must match on it.
+	v1HashHex := "1234567890123456789012345678901234567890"
+	v2HashForV1 := "0000000000000000000000000000000000000000000000000000000000000002"
+	DB.Exec("INSERT INTO registry (info_hash, v1_info_hash, name, created_at) VALUES (?, ?, ?, ?)",
+		v2HashForV1, v1HashHex, "Hybrid Torrent", 0)
+
+	req := httptest.NewRequest("GET", buildAnnounceURL(v1HashHex, "peer001", "6881", "event=completed", "left=0"), nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	w := httptest.NewRecorder()
+	HandleAnnounce(w, req)
+
+	if strings.Contains(w.Body.String(), "failure reason") {
+		t.Fatalf("unexpected failure: %s", w.Body.String())
+	}
+
+	var completions int
+	DB.QueryRow("SELECT completions FROM registry WHERE info_hash = ?", v2HashForV1).Scan(&completions)
+	if completions != 1 {
+		t.Errorf("Expected 1 completion via v1 hash, got %d", completions)
+	}
+}
+
+// passkeyAnnounce builds an authenticated announce URL for userID.
+func passkeyAnnounce(userID, peerID string, extra ...string) string {
+	u := buildAnnounceURL(v2Hash, peerID, "6881", extra...)
+	return "/announce/" + userID + "." + SignUserID(userID) + u[9:]
+}
+
+func TestAnnounceUsageDeltaClampsNegative(t *testing.T) {
+	db := setupTest(t)
+	defer db.Close()
+
+	SetTrackerSecret("test-secret")
+	defer SetTrackerSecret("")
+	userID := "user-clamp"
+
+	do := func(extra ...string) {
+		t.Helper()
+		req := httptest.NewRequest("GET", passkeyAnnounce(userID, "p1", extra...), nil)
+		req.RemoteAddr = "1.2.3.4:5000"
+		w := httptest.NewRecorder()
+		HandleAnnounce(w, req)
+		if strings.Contains(w.Body.String(), "failure reason") {
+			t.Fatalf("unexpected failure: %s", w.Body.String())
+		}
+	}
+
+	// Baseline session counters.
+	do("uploaded=1000", "downloaded=500")
+
+	// Client reset its downloaded counter but uploaded more: the negative
+	// downloaded delta must be clamped to 0, not recorded.
+	do("uploaded=1500", "downloaded=0")
+
+	State.mu.RLock()
+	u := State.Users[userID]
+	State.mu.RUnlock()
+	if u == nil {
+		t.Fatal("expected usage entry for user")
+	}
+	if u.Uploaded != 500 {
+		t.Errorf("Uploaded delta = %d, want 500", u.Uploaded)
+	}
+	if u.Downloaded != 0 {
+		t.Errorf("Downloaded delta = %d, want 0 (negative must be clamped)", u.Downloaded)
+	}
+
+	// Mirror case: downloaded grew, uploaded reset.
+	do("uploaded=0", "downloaded=300")
+	State.mu.RLock()
+	u = State.Users[userID]
+	State.mu.RUnlock()
+	if u.Uploaded != 500 || u.Downloaded != 300 {
+		t.Errorf("after mirror reset: got %d/%d, want 500/300", u.Uploaded, u.Downloaded)
+	}
+}
+
+func TestAnnounceUsageDeltaSkipsZero(t *testing.T) {
+	db := setupTest(t)
+	defer db.Close()
+
+	SetTrackerSecret("test-secret")
+	defer SetTrackerSecret("")
+	userID := "user-zero"
+
+	for _, extra := range [][]string{
+		{"uploaded=100", "downloaded=100"}, // first announce: no oldPeer, nothing tracked
+		{"uploaded=100", "downloaded=100"}, // unchanged: both deltas zero
+		{"uploaded=50", "downloaded=20"},   // both reset: both deltas negative
+	} {
+		req := httptest.NewRequest("GET", passkeyAnnounce(userID, "p1", extra...), nil)
+		req.RemoteAddr = "1.2.3.4:5000"
+		w := httptest.NewRecorder()
+		HandleAnnounce(w, req)
+	}
+
+	State.mu.RLock()
+	_, present := State.Users[userID]
+	State.mu.RUnlock()
+	if present {
+		t.Error("no usage entry should be created when both deltas are <= 0")
+	}
+}
+
+func TestAnnouncePausedEventKeepsPeer(t *testing.T) {
+	db := setupTest(t)
+	defer db.Close()
+
+	State.UpdatePeer(v2Hash, pid20("peer1"), &Peer{Addr: "127.0.0.1:6881", UpdatedAt: 0, Left: 100})
+
+	req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "peer1", "6881", "event=paused", "left=50"), nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	w := httptest.NewRecorder()
+	HandleAnnounce(w, req)
+
+	if strings.Contains(w.Body.String(), "failure reason") {
+		t.Fatalf("event=paused must be accepted, got: %s", w.Body.String())
+	}
+	peer := State.GetPeer(v2Hash, pid20("peer1"))
+	if peer == nil {
+		t.Fatal("paused peer must not be removed")
+	}
+	if peer.Left != 50 || peer.UpdatedAt == 0 {
+		t.Errorf("paused peer should be updated like EventNone, got %+v", peer)
+	}
+}
+
 func TestAnnounceCompletionDBError(t *testing.T) {
 	db := setupTest(t)
 	defer db.Close()
@@ -530,7 +661,6 @@ func TestAnnounceBlockedHash(t *testing.T) {
 func TestAnnounceUnregisteredHash(t *testing.T) {
 	DB = SetupTestDB(t) // Note: NOT setupTest, so no hash registered
 	defer DB.Close()
-	disablePrune = true
 	SetTrackerSecret("")
 
 	req := httptest.NewRequest("GET", buildAnnounceURL(v2Hash, "peer001", "6881"), nil)
@@ -549,7 +679,6 @@ func TestAnnounceUnregisteredHash(t *testing.T) {
 func TestAnnounceOpenTracker(t *testing.T) {
 	DB = SetupTestDB(t) // No hash registered
 	defer DB.Close()
-	disablePrune = true
 	SetTrackerSecret("")
 
 	// Enable open tracker mode
