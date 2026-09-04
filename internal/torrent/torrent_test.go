@@ -597,3 +597,53 @@ func TestCreateDirectorySkipsSymlinks(t *testing.T) {
 	// Symlink may or may not appear depending on OS behavior with filepath.Walk
 	// The important thing is it doesn't crash and the torrent is valid
 }
+
+func TestMagnetLinkEscapesNameAndTrackerRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "model.bin")
+	os.WriteFile(path, []byte("magnet escape test"), 0644)
+
+	name := "my model v2 & more"
+	tracker := "http://localhost:8080/announce?key=a b&x=y#frag"
+	result, err := Create(CreateOptions{
+		Path: path, Name: name, PieceLength: MinPieceLength,
+		AnnounceURL: tracker,
+	})
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// Raw values must not appear unescaped: a literal space or "&" inside dn
+	// or tr would break the URI.
+	if strings.Contains(result.MagnetLink, " ") {
+		t.Errorf("magnet contains a raw space: %s", result.MagnetLink)
+	}
+	if strings.Contains(result.MagnetLink, "#") {
+		t.Errorf("magnet contains a raw #: %s", result.MagnetLink)
+	}
+	if strings.Contains(result.MagnetLink, "&more") || strings.Contains(result.MagnetLink, "&x=y") {
+		t.Errorf("magnet contains an unescaped & from a value: %s", result.MagnetLink)
+	}
+	// Parameter order: xt (v1), xt (v2), dn, tr.
+	idx := func(s string) int { return strings.Index(result.MagnetLink, s) }
+	if !(idx("xt=urn:btih:") < idx("xt=urn:btmh:1220") && idx("xt=urn:btmh:1220") < idx("dn=") && idx("dn=") < idx("tr=")) {
+		t.Errorf("unexpected parameter order: %s", result.MagnetLink)
+	}
+
+	m, err := ParseMagnet(result.MagnetLink)
+	if err != nil {
+		t.Fatalf("ParseMagnet failed: %v", err)
+	}
+	if m.DisplayName != name {
+		t.Errorf("DisplayName = %q, want %q", m.DisplayName, name)
+	}
+	if len(m.Trackers) != 1 || m.Trackers[0] != tracker {
+		t.Errorf("Trackers = %q, want [%q]", m.Trackers, tracker)
+	}
+	if m.InfoHashV1 != result.InfoHashV1Hex {
+		t.Errorf("InfoHashV1 = %s, want %s", m.InfoHashV1, result.InfoHashV1Hex)
+	}
+	if m.InfoHashV2 != result.InfoHashHex {
+		t.Errorf("InfoHashV2 = %s, want %s", m.InfoHashV2, result.InfoHashHex)
+	}
+}

@@ -243,3 +243,49 @@ func TestFlushUsersResilience(t *testing.T) {
 		t.Error("Backlog should be empty after successful drain")
 	}
 }
+
+func TestFlushUsersPreservesInFlightDeltas(t *testing.T) {
+	DB = SetupTestDB(t)
+	defer DB.Close()
+
+	// Hub handler records a second delta for the same user WHILE the sync
+	// request is in flight — the flush must not discard it.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		State.TrackUsage("u1", 7, 3)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+	t.Setenv("HUB_URL", ts.URL)
+
+	State.mu.Lock()
+	State.Users = make(map[string]*UserUsage)
+	State.mu.Unlock()
+	State.TrackUsage("u1", 1000, 500)
+
+	State.FlushUsers()
+
+	State.mu.RLock()
+	u := State.Users["u1"]
+	State.mu.RUnlock()
+	if u == nil {
+		t.Fatal("in-flight delta was discarded: u1 missing from RAM after flush")
+	}
+	if u.Uploaded != 7 || u.Downloaded != 3 {
+		t.Errorf("expected only the in-flight delta (7/3) to remain, got %d/%d", u.Uploaded, u.Downloaded)
+	}
+
+	// A second flush with nothing new arriving drains the entry entirely.
+	fresh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fresh.Close()
+	t.Setenv("HUB_URL", fresh.URL)
+	State.FlushUsers()
+
+	State.mu.RLock()
+	_, present := State.Users["u1"]
+	State.mu.RUnlock()
+	if present {
+		t.Error("fully-synced user should be removed from RAM")
+	}
+}

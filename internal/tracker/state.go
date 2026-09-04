@@ -305,9 +305,18 @@ func (s *SwarmState) FlushUsers() {
 	}
 
 	s.mu.Lock()
-	// Clear ONLY the users we just sent (to avoid clearing new data added during the POST)
-	for id := range payload {
-		delete(s.Users, id)
+	// Subtract ONLY the amounts we just sent. Deltas that accrued for these
+	// users while the POST was in flight stay in RAM for the next flush.
+	for id, sent := range payload {
+		live := s.Users[id]
+		if live == nil {
+			continue
+		}
+		live.Uploaded -= sent.Uploaded
+		live.Downloaded -= sent.Downloaded
+		if live.Uploaded == 0 && live.Downloaded == 0 {
+			delete(s.Users, id)
+		}
 	}
 	s.mu.Unlock()
 }

@@ -37,7 +37,7 @@ The tracker fully recognizes the announce request before any business logic runs
 | `peer_id` | Required. Exactly 20 bytes per BEP 3. |
 | `port` | Required. Integer 1–65535. |
 | `uploaded` / `downloaded` / `left` | If present, non-negative integer. Absent → 0. |
-| `event` | If present, one of `started`, `stopped`, `completed`. |
+| `event` | If present, one of `started`, `stopped`, `completed`, `paused` (BEP 21 partial seed; treated as a normal update). |
 | `numwant` | If present, integer 0–1000. |
 | `compact` | If present, `0` or `1`. Default `1` (BEP 23). |
 
@@ -71,12 +71,12 @@ interface RegistryEntry {
 
 ### `GET /api/registry?info_hash={hash}`
 
-Lookup a single registry entry by info hash.
+Lookup a single registry entry by info hash. Accepts either the v2 (SHA-256) hash the entry was registered under or the v1 (SHA-1) hash of a hybrid entry; the same applies to `/api/registry/torrent`, `/api/registry/meta`, and `DELETE`.
 
 **Query params:**
 | Param | Required | Description |
 |-------|----------|-------------|
-| `info_hash` | yes | The hex info hash |
+| `info_hash` | yes | The hex info hash (v2, or the v1 hash of a hybrid entry) |
 
 **Response:**
 - `200` — `RegistryEntry` JSON object
@@ -219,7 +219,7 @@ curl -X POST http://localhost:8080/api/registry \
 
 ### `DELETE /api/registry?info_hash={hash}`
 
-Remove a torrent entry and block the hash from the tracker. Deletes the registry entry, removes all peers, and adds the hash to the blocklist. Blocked hashes are rejected by `/announce` and skipped by `/scrape`.
+Remove a torrent entry and block the hash from the tracker. Deletes the registry entry, then for both of its hashes (v2 and, for hybrid entries, v1) removes all peers and adds the hash to the blocklist. Blocked hashes are rejected by `/announce` and skipped by `/scrape`. The `info_hash` param may be either hash.
 
 **Query params:**
 | Param | Required | Description |
@@ -251,7 +251,7 @@ Download the `.torrent` file associated with a registered hash.
 **Query params:**
 | Param | Required | Description |
 |-------|----------|-------------|
-| `info_hash` | yes | The hex info hash |
+| `info_hash` | yes | The hex info hash (v2 or v1) |
 
 **Response:**
 - `200` — Binary `.torrent` file with `Content-Type: application/x-bittorrent`
@@ -271,7 +271,7 @@ Returns pre-parsed metadata from the stored `.torrent` file as JSON. Useful for 
 **Query params:**
 | Param | Required | Description |
 |-------|----------|-------------|
-| `info_hash` | yes | The hex info hash |
+| `info_hash` | yes | The hex info hash (v2 or v1) |
 
 **Response:**
 - `200` — JSON metadata object
@@ -294,6 +294,14 @@ curl "http://localhost:8080/api/registry/meta?info_hash=bf1a33cb..."
   ]
 }
 ```
+
+---
+
+### `GET /scrape?info_hash={bin_hash}&info_hash={bin_hash}...`
+
+BEP 48 swarm stats. Each `info_hash` is the raw 20- or 32-byte hash, percent-encoded. Returns a bencoded `files` dict keyed by the raw hash with `complete`, `incomplete`, and `downloaded` counts. Unregistered and blocked hashes are omitted rather than errored.
+
+Limits: at most **100** hashes per request; extras are ignored. Rate-limited like `/announce`.
 
 ---
 

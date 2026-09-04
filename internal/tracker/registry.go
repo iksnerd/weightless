@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,7 +18,33 @@ import (
 	"weightless/internal/torrent"
 )
 
-var registryKey = os.Getenv("REGISTRY_KEY")
+// testRegistryKey overrides REGISTRY_KEY for tests (same pattern as
+// testSecret / SetTrackerSecret in auth.go).
+var testRegistryKey string
+
+// registryKey returns the write-API key at call time rather than at package
+// init, so a key loaded into the environment later (e.g. from .env.local via
+// InitConfig -> loadEnv) is honoured.
+func registryKey() string {
+	if testRegistryKey != "" {
+		return testRegistryKey
+	}
+	return os.Getenv("REGISTRY_KEY")
+}
+
+// registryAuthorized checks the X-Weightless-Key header against REGISTRY_KEY.
+// Returns true when no key is configured (open write API).
+func registryAuthorized(r *http.Request) bool {
+	key := registryKey()
+	if key == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Weightless-Key")), []byte(key)) == 1
+}
+
+// registryLookup is the WHERE clause matching a registry row by either its v2
+// (info_hash) or v1 (v1_info_hash) hash. Pass the hash twice as arguments.
+const registryLookup = " WHERE info_hash = ? OR v1_info_hash = ?"
 
 type registryEntry struct {
 	InfoHash    string `json:"info_hash"`
@@ -72,7 +99,7 @@ func HandleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		e, err := scanRegistryEntry(DB.QueryRow("SELECT "+registryCols+" FROM registry WHERE info_hash = ?", hash))
+		e, err := scanRegistryEntry(DB.QueryRow("SELECT "+registryCols+" FROM registry"+registryLookup, hash, hash))
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
@@ -90,11 +117,9 @@ func HandleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case http.MethodPost:
-		if registryKey != "" {
-			if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Weightless-Key")), []byte(registryKey)) != 1 {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
+		if !registryAuthorized(r) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
 		}
 
 		var body struct {
@@ -145,11 +170,9 @@ func HandleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case http.MethodDelete:
-		if registryKey != "" {
-			if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Weightless-Key")), []byte(registryKey)) != 1 {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
+		if !registryAuthorized(r) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
 		}
 
 		hash := r.URL.Query().Get("info_hash")
@@ -160,24 +183,44 @@ func HandleAPI(w http.ResponseWriter, r *http.Request) {
 
 		reason := r.URL.Query().Get("reason")
 
-		if _, err := DB.Exec("DELETE FROM registry WHERE info_hash = ?", hash); err != nil {
+		// Resolve the row by either hash so a takedown tears down BOTH the v2
+		// and v1 swarms of a hybrid torrent, not just the one that was named.
+		// If the row is already gone, still block/purge the given hash.
+		var v2, v1 string
+		err := DB.QueryRow("SELECT info_hash, v1_info_hash FROM registry"+registryLookup, hash, hash).Scan(&v2, &v1)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("Registry lookup error: %v", err)
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+		var hashes []string
+		for _, h := range []string{hash, v2, v1} {
+			if h != "" && !slices.Contains(hashes, h) {
+				hashes = append(hashes, h)
+			}
+		}
+
+		if _, err := DB.Exec("DELETE FROM registry"+registryLookup, hash, hash); err != nil {
 			log.Printf("Registry delete error: %v", err)
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 			return
 		}
-		if _, err := DB.Exec("DELETE FROM peers WHERE info_hash = ?", hash); err != nil {
-			log.Printf("Peer delete error: %v", err)
-			http.Error(w, "Internal error", http.StatusInternalServerError)
-			return
-		}
-		State.mu.Lock()
-		delete(State.Peers, hash)
-		State.mu.Unlock()
-		if _, err := DB.Exec("INSERT OR IGNORE INTO blocklist (info_hash, reason, created_at) VALUES (?, ?, ?)",
-			hash, reason, time.Now().Unix()); err != nil {
-			log.Printf("Blocklist insert error: %v", err)
-			http.Error(w, "Internal error", http.StatusInternalServerError)
-			return
+		now := time.Now().Unix()
+		for _, h := range hashes {
+			if _, err := DB.Exec("DELETE FROM peers WHERE info_hash = ?", h); err != nil {
+				log.Printf("Peer delete error: %v", err)
+				http.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
+			State.mu.Lock()
+			delete(State.Peers, h)
+			State.mu.Unlock()
+			if _, err := DB.Exec("INSERT OR IGNORE INTO blocklist (info_hash, reason, created_at) VALUES (?, ?, ?)",
+				h, reason, now); err != nil {
+				log.Printf("Blocklist insert error: %v", err)
+				http.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		// Update registered count in memory
@@ -206,7 +249,7 @@ func HandleTorrentDownload(w http.ResponseWriter, r *http.Request) {
 
 	var data []byte
 	var name string
-	err := DB.QueryRow("SELECT torrent_data, name FROM registry WHERE info_hash = ?", hash).Scan(&data, &name)
+	err := DB.QueryRow("SELECT torrent_data, name FROM registry"+registryLookup, hash, hash).Scan(&data, &name)
 	if err != nil || len(data) == 0 {
 		http.Error(w, "Torrent not found", http.StatusNotFound)
 		return
@@ -370,7 +413,7 @@ func HandleMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var data []byte
-	err := DB.QueryRow("SELECT torrent_data FROM registry WHERE info_hash = ?", hash).Scan(&data)
+	err := DB.QueryRow("SELECT torrent_data FROM registry"+registryLookup, hash, hash).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return

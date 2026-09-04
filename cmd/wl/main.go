@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -444,8 +443,13 @@ func acquireMetadata(ctx context.Context, trackerBase, announceURL string, mag t
 		return nil, torrent.TorrentMeta{}, fmt.Errorf("invalid v1 info hash %q", mag.InfoHashV1)
 	}
 
-	peerID := newPeerID()
-	addrs, err := client.Announce(ctx, announceURL, string(v1Hash), peerID, 6881, 0)
+	peerID := client.GeneratePeerID()
+	addrs, err := client.Announce(ctx, announceURL, client.AnnounceOptions{
+		InfoHash: string(v1Hash),
+		PeerID:   peerID,
+		Port:     6881,
+		Event:    client.EventStarted,
+	})
 	if err != nil {
 		return nil, torrent.TorrentMeta{}, fmt.Errorf("announce for peers: %w", err)
 	}
@@ -496,19 +500,6 @@ func fetchMetadataFromPeers(ctx context.Context, addrs []string, v1Hash []byte, 
 		lastErr = err
 	}
 	return nil, fmt.Errorf("no peer served metadata (%d tried): %w", len(addrs), lastErr)
-}
-
-// newPeerID returns a 20-byte BEP 20 peer id.
-func newPeerID() string {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		return "-WL0020-aaaaaaaaaaaa"
-	}
-	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
-	for i := range b {
-		b[i] = charset[int(b[i])%len(charset)]
-	}
-	return "-WL0020-" + string(b)
 }
 
 // buildAnnounceURL constructs the announce URL, optionally with a signed passkey path.

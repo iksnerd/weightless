@@ -92,16 +92,25 @@ wl get --user-id alice "magnet:?xt=urn:btih:abc123..."
 2. **Fast path**: Fetches `.torrent` metadata from the tracker's `/api/registry/torrent` API
 3. Decodes the bencoded info dict — file list, piece hashes, piece length
 4. Saves the `.torrent` file to the output directory
-5. Announces to the tracker to discover peers
+5. Announces `started` to the tracker to discover peers
 6. Downloads pieces concurrently from the swarm (multi-worker, configurable)
 7. Verifies each piece with SHA-1 hash checking
 8. Writes verified data to disk (handles multi-file torrents with correct offsets)
+9. Announces `completed` then `stopped` (or just `stopped` on failure or Ctrl-C), so the tracker counts the download and drops the peer instead of listing it for another hour. `wl get` does not seed, so `uploaded` is always reported as 0.
+
+### Input safety
+
+Metadata is untrusted whether it comes from the registry or from a peer over BEP 9:
+
+- File paths are rejected if any component is empty, `.`, `..`, absolute, or contains a path separator or NUL. Storage independently refuses to write outside `--output`.
+- The v1 `pieces` string must be a whole number of 20-byte hashes and match the piece count implied by the total size. v2-only torrents (no v1 `pieces`) are refused; the downloader verifies against SHA-1 pieces only.
+- Bencode is structurally validated (size, depth, list/dict length) before decoding.
 
 ### P2P Features
 
 - **BEP 3** — Peer Wire Protocol (handshake, choke/unchoke, request/piece)
 - **BEP 10** — Extension Protocol (negotiates extensions with peers)
-- **BEP 9** — Metadata Exchange (fetch info dict from peers when tracker API is unavailable)
+- **BEP 9** — Metadata Exchange (fetch info dict from peers when tracker API is unavailable). Interleaved `bitfield`/`have`/keep-alive/PEX messages are skipped, and each reply is checked for piece index and length.
 - **Concurrent swarm** — Multiple workers download from different peers simultaneously
 - **Reconnect on failure** — Automatically retries failed pieces with other peers
 

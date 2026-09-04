@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"log"
 	"os"
-	"time"
 )
 
 var DB *sql.DB
@@ -70,44 +69,4 @@ func InitSchema() {
 	}
 
 	log.Println("Schema initialized")
-}
-
-func startPruner() {
-	ticker := time.NewTicker(30 * time.Minute)
-	for range ticker.C {
-		if err := PrunePeers(); err != nil {
-			log.Printf("Error pruning peers: %v", err)
-		}
-	}
-}
-
-var disablePrune bool
-
-func MaybePrunePeers() {
-	if disablePrune {
-		return
-	}
-	// Probabilistically prune peers (1/100 requests)
-	// This helps in serverless environments where a background pruner
-	// may not run frequently.
-	if time.Now().UnixNano()%100 == 0 {
-		go func() {
-			if err := PrunePeers(); err != nil {
-				log.Printf("Probabilistic prune error: %v", err)
-			}
-		}()
-	}
-}
-
-func PrunePeers() error {
-	expiry := time.Now().Unix() - 3600
-	res, err := DB.Exec("DELETE FROM peers WHERE updated_at < ?", expiry)
-	if err != nil {
-		return err
-	}
-	rows, _ := res.RowsAffected()
-	if rows > 0 {
-		log.Printf("Pruned %d stale peers", rows)
-	}
-	return nil
 }

@@ -92,3 +92,26 @@ func TestLimitMiddleware(t *testing.T) {
 		t.Error("Announce block should return failure reason")
 	}
 }
+
+func TestLimitMiddlewarePasskeyAnnouncePath(t *testing.T) {
+	rl := NewRateLimiter(100.0, 1.0, 10)
+	handler := rl.LimitMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// /announce/<passkey> must get a bencoded failure, not a bare 429,
+	// because BitTorrent clients only parse bencoded tracker responses.
+	req := httptest.NewRequest("GET", "/announce/abc.def?info_hash=x", nil)
+	req.RemoteAddr = "9.9.9.9:1234"
+	w1 := httptest.NewRecorder()
+	handler(w1, req) // consumes the single burst token
+
+	w2 := httptest.NewRecorder()
+	handler(w2, req)
+	if w2.Code != http.StatusOK {
+		t.Errorf("passkey announce should return 200 when blocked, got %d", w2.Code)
+	}
+	if !strings.Contains(w2.Body.String(), "failure reason") {
+		t.Errorf("passkey announce block should return bencoded failure, got %q", w2.Body.String())
+	}
+}

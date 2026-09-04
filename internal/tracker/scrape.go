@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"database/sql"
 	"encoding/hex"
 	"log"
 	"net/http"
@@ -9,11 +10,19 @@ import (
 	"github.com/zeebo/bencode"
 )
 
+// maxScrapeHashes bounds the per-request work: each info_hash costs DB
+// queries, so extras beyond this cap are silently ignored (as other trackers do).
+const maxScrapeHashes = 100
+
 // HandleScrape implements BEP 48 scrape convention.
 // Returns swarm stats (complete, downloaded, incomplete) for each requested info_hash.
 func HandleScrape(w http.ResponseWriter, r *http.Request) {
 	metricScrapes.Inc()
 	hashesRaw := r.URL.Query()["info_hash"]
+	if len(hashesRaw) > maxScrapeHashes {
+		hashesRaw = hashesRaw[:maxScrapeHashes]
+	}
+	openTracker := os.Getenv("OPEN_TRACKER") == "true"
 
 	files := make(map[string]interface{})
 	for _, hashRaw := range hashesRaw {
@@ -24,13 +33,19 @@ func HandleScrape(w http.ResponseWriter, r *http.Request) {
 		// Convert binary hash to hex string
 		hash := hex.EncodeToString([]byte(hashRaw))
 
-		// Registry-Only Tracking (skip if OPEN_TRACKER=true)
-		if os.Getenv("OPEN_TRACKER") != "true" {
-			var registered int
-			err := DB.QueryRow("SELECT 1 FROM registry WHERE info_hash = ? OR v1_info_hash = ?", hash, hash).Scan(&registered)
-			if err != nil || registered == 0 {
+		// One registry lookup serves both the registered check and the
+		// completions count. ErrNoRows means unregistered.
+		var downloaded int
+		err := DB.QueryRow("SELECT COALESCE(completions, 0) FROM registry WHERE info_hash = ? OR v1_info_hash = ?", hash, hash).Scan(&downloaded)
+		if err != nil {
+			if err != sql.ErrNoRows {
+				log.Printf("Scrape registry query error: %v", err)
+			}
+			// Registry-Only Tracking (skip if OPEN_TRACKER=true)
+			if !openTracker {
 				continue
 			}
+			downloaded = 0
 		}
 
 		var blocked int
@@ -41,9 +56,6 @@ func HandleScrape(w http.ResponseWriter, r *http.Request) {
 
 		// Fetch counts from memory
 		complete, incomplete := State.GetCounts(hash)
-
-		var downloaded int
-		_ = DB.QueryRow("SELECT COALESCE(completions, 0) FROM registry WHERE info_hash = ? OR v1_info_hash = ?", hash, hash).Scan(&downloaded)
 
 		files[hashRaw] = map[string]interface{}{
 			"complete":   complete,

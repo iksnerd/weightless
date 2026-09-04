@@ -3,6 +3,7 @@ package torrent
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/zeebo/bencode"
 
@@ -47,7 +48,7 @@ func Parse(data []byte) (TorrentMeta, error) {
 		return TorrentMeta{}, fmt.Errorf("missing or invalid info dict")
 	}
 
-	return parseInfoMap(info), nil
+	return parseInfoMap(info)
 }
 
 // ParseInfo decodes a bare bencoded info dictionary (the value of the "info"
@@ -61,12 +62,16 @@ func ParseInfo(infoData []byte) (TorrentMeta, error) {
 	if err := bencode.DecodeBytes(infoData, &info); err != nil {
 		return TorrentMeta{}, fmt.Errorf("bencode decode: %w", err)
 	}
-	return parseInfoMap(info), nil
+	return parseInfoMap(info)
 }
 
 // parseInfoMap extracts TorrentMeta fields from a decoded info dict. Shared by
 // Parse (full .torrent) and ParseInfo (bare info dict from a peer).
-func parseInfoMap(info map[string]interface{}) TorrentMeta {
+//
+// Every file path is validated with safeJoin before it lands in TorrentMeta:
+// the info dict is attacker-controlled (registry download or BEP 9 exchange)
+// and the client joins these paths onto its output directory.
+func parseInfoMap(info map[string]interface{}) (TorrentMeta, error) {
 	meta := TorrentMeta{}
 	if v, ok := info["name"].(string); ok {
 		meta.Name = v
@@ -75,19 +80,26 @@ func parseInfoMap(info map[string]interface{}) TorrentMeta {
 		meta.PieceLength = int(v)
 	}
 	if v, ok := info["pieces"].(string); ok {
+		if len(v)%20 != 0 {
+			return TorrentMeta{}, fmt.Errorf("pieces length not a multiple of 20")
+		}
 		meta.Pieces = []byte(v)
 		meta.PieceCount = len(meta.Pieces) / 20
 	}
 
 	// Single file
 	if length, ok := info["length"].(int64); ok {
+		path, err := safeJoin([]string{meta.Name})
+		if err != nil {
+			return TorrentMeta{}, fmt.Errorf("name: %w", err)
+		}
 		meta.TotalSize = length
-		meta.Files = []FileEntry{{Path: meta.Name, Length: length}}
+		meta.Files = []FileEntry{{Path: path, Length: length}}
 	}
 
 	// Multi-file (v1)
 	if files, ok := info["files"].([]interface{}); ok {
-		for _, f := range files {
+		for i, f := range files {
 			dict, ok := f.(map[string]interface{})
 			if !ok {
 				continue
@@ -104,7 +116,11 @@ func parseInfoMap(info map[string]interface{}) TorrentMeta {
 						parts = append(parts, s)
 					}
 				}
-				fe.Path = filepath.Join(parts...)
+				path, err := safeJoin(parts)
+				if err != nil {
+					return TorrentMeta{}, fmt.Errorf("files[%d] path: %w", i, err)
+				}
+				fe.Path = path
 			}
 			meta.Files = append(meta.Files, fe)
 		}
@@ -113,10 +129,24 @@ func parseInfoMap(info map[string]interface{}) TorrentMeta {
 	// If no v1 files list, try v2 file tree (BEP 52)
 	if len(meta.Files) == 0 {
 		if fileTree, ok := info["file tree"].(map[string]interface{}); ok {
-			meta.Files = walkFileTree(fileTree, "", 0)
+			files, err := walkFileTree(fileTree, nil, 0)
+			if err != nil {
+				return TorrentMeta{}, fmt.Errorf("file tree: %w", err)
+			}
+			meta.Files = files
 			for _, f := range meta.Files {
 				meta.TotalSize += f.Length
 			}
+		}
+	}
+
+	// Cross-check the v1 pieces string against the declared layout. A
+	// mismatch means the piece-to-file offset math would be wrong downstream.
+	if meta.Pieces != nil && meta.PieceLength > 0 && len(meta.Files) > 0 {
+		want := int((meta.TotalSize + int64(meta.PieceLength) - 1) / int64(meta.PieceLength))
+		if meta.PieceCount != want {
+			return TorrentMeta{}, fmt.Errorf("pieces count %d does not match total size %d / piece length %d (want %d)",
+				meta.PieceCount, meta.TotalSize, meta.PieceLength, want)
 		}
 	}
 
@@ -125,15 +155,45 @@ func parseInfoMap(info map[string]interface{}) TorrentMeta {
 		meta.PieceCount = int((meta.TotalSize + int64(meta.PieceLength) - 1) / int64(meta.PieceLength))
 	}
 
-	return meta
+	return meta, nil
+}
+
+// safeJoin joins torrent-supplied path components into a relative path,
+// rejecting anything that could escape the download directory: empty
+// components, "." and "..", components containing a path separator (either
+// flavour) or NUL, and absolute paths.
+func safeJoin(parts []string) (string, error) {
+	if len(parts) == 0 {
+		return "", fmt.Errorf("empty path")
+	}
+	for _, p := range parts {
+		switch {
+		case p == "":
+			return "", fmt.Errorf("empty path component")
+		case p == "." || p == "..":
+			return "", fmt.Errorf("path component %q not allowed", p)
+		case strings.ContainsAny(p, "/\\\x00"):
+			return "", fmt.Errorf("path component %q contains separator or NUL", p)
+		case filepath.IsAbs(p) || filepath.VolumeName(p) != "":
+			// Separators are already rejected above; this catches Windows
+			// drive-relative forms like "C:foo" that Join would not neutralise.
+			return "", fmt.Errorf("absolute path component %q not allowed", p)
+		}
+	}
+	joined := filepath.Join(parts...)
+	if filepath.IsAbs(joined) {
+		return "", fmt.Errorf("absolute path %q not allowed", joined)
+	}
+	return joined, nil
 }
 
 // walkFileTree recursively walks a BEP 52 file tree and collects file entries.
 // depth is the current recursion level — bailing out at maxFileTreeDepth
-// caps stack use even if upstream validation was bypassed.
-func walkFileTree(tree map[string]interface{}, prefix string, depth int) []FileEntry {
+// caps stack use even if upstream validation was bypassed. Map keys are the
+// path components and are validated via safeJoin on every leaf.
+func walkFileTree(tree map[string]interface{}, prefix []string, depth int) ([]FileEntry, error) {
 	if depth > maxFileTreeDepth {
-		return nil
+		return nil, nil
 	}
 	var files []FileEntry
 	for name, val := range tree {
@@ -141,18 +201,30 @@ func walkFileTree(tree map[string]interface{}, prefix string, depth int) []FileE
 		if !ok {
 			continue
 		}
-		path := filepath.Join(prefix, name)
+		parts := append(append([]string(nil), prefix...), name)
 		// Leaf node: has "" key with length
 		if leaf, ok := node[""].(map[string]interface{}); ok {
+			path, err := safeJoin(parts)
+			if err != nil {
+				return nil, err
+			}
 			var length int64
 			if l, ok := leaf["length"].(int64); ok {
 				length = l
 			}
 			files = append(files, FileEntry{Path: path, Length: length})
 		} else {
-			// Directory node: recurse
-			files = append(files, walkFileTree(node, path, depth+1)...)
+			// Directory node: validate the component before recursing so a
+			// bad directory name is rejected even if it has no leaves.
+			if _, err := safeJoin(parts); err != nil {
+				return nil, err
+			}
+			sub, err := walkFileTree(node, parts, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, sub...)
 		}
 	}
-	return files
+	return files, nil
 }

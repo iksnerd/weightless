@@ -20,6 +20,9 @@ const (
 	EventStarted
 	EventStopped
 	EventCompleted
+	// EventPaused is sent by libtorrent-based clients (qBittorrent) when a
+	// peer becomes a partial seed (BEP 21). Treated like EventNone downstream.
+	EventPaused
 )
 
 // AnnounceParams is the fully-recognized announce request. Once constructed
@@ -142,8 +145,10 @@ func RecognizeAnnounce(q url.Values) (AnnounceParams, error) {
 		p.Event = EventStopped
 	case "completed":
 		p.Event = EventCompleted
+	case "paused":
+		p.Event = EventPaused
 	default:
-		return p, fmt.Errorf("invalid event: must be started, stopped, or completed")
+		return p, fmt.Errorf("invalid event: must be started, stopped, completed, or paused")
 	}
 
 	// numwant — optional, 0..MaxNumWant

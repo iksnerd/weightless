@@ -15,6 +15,10 @@ import (
 var (
 	MaxPeers          = 50
 	GlobalRateLimiter = NewRateLimiter(5.0, 10.0, 10000) // 5 req/sec, 10 burst
+
+	// Version is reported by IndexHandler. main sets it from the ldflags-embedded
+	// build version before registering routes; "dev" is the fallback.
+	Version = "dev"
 )
 
 func loadEnv() {
@@ -73,7 +77,7 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	fmt.Fprint(w, "Weightless Tracker v1.0")
+	fmt.Fprintf(w, "Weightless Tracker %s", Version)
 }
 
 func HealthHandler(w http.ResponseWriter, _ *http.Request) {

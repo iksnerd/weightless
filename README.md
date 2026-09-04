@@ -58,7 +58,7 @@ go build -o wl ./cmd/wl/
 - **Authenticated Swarms:** Signed passkeys (HMAC-SHA256) for user-level bandwidth tracking without a central user database.
 - **Downtime Resilience:** Three-tier usage tracking (RAM -> SQLite backlog -> external sync) handles network outages gracefully.
 - **Observability:** Exposes a `/metrics` endpoint in Prometheus format.
-- **LangSec-hardened parsers:** Typed announce recognizer, bounded bencode validator, and strict BEP 3 handshake. Every untrusted input boundary recognizes against a formal grammar before any business logic runs — no shotgun parsers in the public attack surface.
+- **LangSec-hardened parsers:** Typed announce recognizer, bounded bencode validator, strict BEP 3 handshake, and torrent file paths validated before anything touches disk. Every untrusted input boundary recognizes against a formal grammar before any business logic runs — no shotgun parsers in the public attack surface.
 
 **Tracker endpoints:**
 
@@ -66,8 +66,8 @@ go build -o wl ./cmd/wl/
 |----------|--------|-------------|
 | `/` | GET | Version string |
 | `/announce` | GET | BEP 3/7/52 peer announce (compact format, rate-limited, registry-only) |
-| `/scrape` | GET | BEP 48 swarm stats (rate-limited) |
-| `/api/registry` | GET | Lookup torrent metadata by info_hash |
+| `/scrape` | GET | BEP 48 swarm stats (rate-limited, max 100 hashes per request) |
+| `/api/registry` | GET | Lookup torrent metadata by info_hash (v2 or v1 hash) |
 | `/api/registry` | POST | Register torrent metadata (JSON body) |
 | `/api/registry` | DELETE | Takedown: remove entry + block hash (requires API key) |
 | `/api/registry/search` | GET | Search registry by name, category, publisher, tags |
@@ -174,7 +174,7 @@ Resolves the magnet link, fetches metadata from the tracker (fast path), then do
 | `PORT` | `8080` | HTTP listen port |
 | `DB_PATH` | `./weightless.db` | SQLite database path |
 | `MAX_PEERS` | `50` | Max peers returned per announce |
-| `REGISTRY_KEY` | _(unset)_ | If set, POST to `/api/registry` requires `X-Weightless-Key` header |
+| `REGISTRY_KEY` | _(unset)_ | If set, POST and DELETE on `/api/registry` require the `X-Weightless-Key` header. Read per request, so `.env.local` works. |
 | `TRACKER_SECRET` | _(unset)_ | If set, enables HMAC-SHA256 passkey auth on `/announce` |
 | `OPEN_TRACKER` | `false` | If `true`, accepts announces for any info_hash (disables registry-only check) |
 | `GCS_ACCESS_KEY` | — | Litestream GCS credentials |

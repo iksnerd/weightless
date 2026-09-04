@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zeebo/bencode"
 )
 
 func TestParse(t *testing.T) {
@@ -106,4 +108,288 @@ func TestParseRejectsDeeplyNested(t *testing.T) {
 	if _, err := Parse(data); err == nil {
 		t.Error("expected depth-limit rejection, got nil")
 	}
+}
+
+// encodeInfoTorrent wraps an info dict into a minimal bencoded .torrent.
+func encodeInfoTorrent(t *testing.T, info map[string]interface{}) []byte {
+	t.Helper()
+	data, err := bencode.EncodeBytes(map[string]interface{}{
+		"announce": "http://localhost:8080/announce",
+		"info":     info,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestParseRejectsPathTraversal(t *testing.T) {
+	pieces := strings.Repeat("\x00", 20)
+	cases := []struct {
+		name string
+		info map[string]interface{}
+	}{
+		{"v1 files dotdot", map[string]interface{}{
+			"name": "ds", "piece length": int64(MinPieceLength), "pieces": pieces,
+			"files": []interface{}{
+				map[string]interface{}{"length": int64(4), "path": []interface{}{"..", "x"}},
+			},
+		}},
+		{"v1 files dot", map[string]interface{}{
+			"name": "ds", "piece length": int64(MinPieceLength), "pieces": pieces,
+			"files": []interface{}{
+				map[string]interface{}{"length": int64(4), "path": []interface{}{".", "x"}},
+			},
+		}},
+		{"v1 files empty component", map[string]interface{}{
+			"name": "ds", "piece length": int64(MinPieceLength), "pieces": pieces,
+			"files": []interface{}{
+				map[string]interface{}{"length": int64(4), "path": []interface{}{"", "x"}},
+			},
+		}},
+		{"v1 files absolute component", map[string]interface{}{
+			"name": "ds", "piece length": int64(MinPieceLength), "pieces": pieces,
+			"files": []interface{}{
+				map[string]interface{}{"length": int64(4), "path": []interface{}{"/etc", "passwd"}},
+			},
+		}},
+		{"v1 files separator in component", map[string]interface{}{
+			"name": "ds", "piece length": int64(MinPieceLength), "pieces": pieces,
+			"files": []interface{}{
+				map[string]interface{}{"length": int64(4), "path": []interface{}{"a/../../x"}},
+			},
+		}},
+		{"v1 files backslash in component", map[string]interface{}{
+			"name": "ds", "piece length": int64(MinPieceLength), "pieces": pieces,
+			"files": []interface{}{
+				map[string]interface{}{"length": int64(4), "path": []interface{}{"..\\x"}},
+			},
+		}},
+		{"v1 files NUL in component", map[string]interface{}{
+			"name": "ds", "piece length": int64(MinPieceLength), "pieces": pieces,
+			"files": []interface{}{
+				map[string]interface{}{"length": int64(4), "path": []interface{}{"x\x00y"}},
+			},
+		}},
+		{"v2 file tree dotdot key", map[string]interface{}{
+			"name": "ds", "piece length": int64(MinPieceLength), "meta version": int64(2),
+			"file tree": map[string]interface{}{
+				"..": map[string]interface{}{
+					"x": map[string]interface{}{
+						"": map[string]interface{}{"length": int64(4)},
+					},
+				},
+			},
+		}},
+		{"v2 file tree dotdot leaf", map[string]interface{}{
+			"name": "ds", "piece length": int64(MinPieceLength), "meta version": int64(2),
+			"file tree": map[string]interface{}{
+				"..": map[string]interface{}{
+					"": map[string]interface{}{"length": int64(4)},
+				},
+			},
+		}},
+		{"v2 file tree absolute key", map[string]interface{}{
+			"name": "ds", "piece length": int64(MinPieceLength), "meta version": int64(2),
+			"file tree": map[string]interface{}{
+				"/tmp": map[string]interface{}{
+					"x": map[string]interface{}{
+						"": map[string]interface{}{"length": int64(4)},
+					},
+				},
+			},
+		}},
+		{"single file dotdot name", map[string]interface{}{
+			"name": "..", "piece length": int64(MinPieceLength), "pieces": pieces,
+			"length": int64(4),
+		}},
+		{"single file absolute name", map[string]interface{}{
+			"name": "/etc/passwd", "piece length": int64(MinPieceLength), "pieces": pieces,
+			"length": int64(4),
+		}},
+		{"single file empty name", map[string]interface{}{
+			"name": "", "piece length": int64(MinPieceLength), "pieces": pieces,
+			"length": int64(4),
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			data := encodeInfoTorrent(t, c.info)
+			if _, err := Parse(data); err == nil {
+				t.Errorf("expected rejection, got nil")
+			}
+			// ParseInfo shares the same code path; confirm it rejects too.
+			infoBytes, err := bencode.EncodeBytes(c.info)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ParseInfo(infoBytes); err == nil {
+				t.Errorf("ParseInfo: expected rejection, got nil")
+			}
+		})
+	}
+}
+
+func TestParseAcceptsNestedPaths(t *testing.T) {
+	// 8 bytes total, 1 piece.
+	pieces := strings.Repeat("\x00", 20)
+	v1 := map[string]interface{}{
+		"name": "ds", "piece length": int64(MinPieceLength), "pieces": pieces,
+		"files": []interface{}{
+			map[string]interface{}{"length": int64(4), "path": []interface{}{"sub", "deep", "a.txt"}},
+			map[string]interface{}{"length": int64(4), "path": []interface{}{"b..txt"}},
+		},
+	}
+	meta, err := Parse(encodeInfoTorrent(t, v1))
+	if err != nil {
+		t.Fatalf("v1 nested: %v", err)
+	}
+	if len(meta.Files) != 2 {
+		t.Fatalf("v1 nested: want 2 files, got %d", len(meta.Files))
+	}
+	if want := filepath.Join("sub", "deep", "a.txt"); meta.Files[0].Path != want {
+		t.Errorf("v1 nested: path = %q, want %q", meta.Files[0].Path, want)
+	}
+	if meta.Files[1].Path != "b..txt" {
+		t.Errorf("v1 nested: path = %q, want b..txt", meta.Files[1].Path)
+	}
+	if meta.PieceCount != 1 {
+		t.Errorf("v1 nested: piece count = %d, want 1", meta.PieceCount)
+	}
+
+	v2 := map[string]interface{}{
+		"name": "ds", "piece length": int64(MinPieceLength), "meta version": int64(2),
+		"file tree": map[string]interface{}{
+			"sub": map[string]interface{}{
+				"deep": map[string]interface{}{
+					"a.txt": map[string]interface{}{
+						"": map[string]interface{}{"length": int64(4)},
+					},
+				},
+			},
+		},
+	}
+	meta, err = Parse(encodeInfoTorrent(t, v2))
+	if err != nil {
+		t.Fatalf("v2 nested: %v", err)
+	}
+	if len(meta.Files) != 1 {
+		t.Fatalf("v2 nested: want 1 file, got %d", len(meta.Files))
+	}
+	if want := filepath.Join("sub", "deep", "a.txt"); meta.Files[0].Path != want {
+		t.Errorf("v2 nested: path = %q, want %q", meta.Files[0].Path, want)
+	}
+	if meta.Pieces != nil {
+		t.Errorf("v2-only: Pieces should be nil, got %d bytes", len(meta.Pieces))
+	}
+	if meta.PieceCount != 1 {
+		t.Errorf("v2-only: piece count = %d, want 1 (computed from size)", meta.PieceCount)
+	}
+}
+
+func TestSafeJoin(t *testing.T) {
+	bad := [][]string{
+		nil, {""}, {"."}, {".."}, {"a", ".."}, {"..", "a"},
+		{"a/b"}, {"a\\b"}, {"a\x00b"}, {"/a"}, {"/"},
+	}
+	for _, parts := range bad {
+		if _, err := safeJoin(parts); err == nil {
+			t.Errorf("safeJoin(%q): expected error", parts)
+		}
+	}
+	good := map[string][]string{
+		"a":                         {"a"},
+		filepath.Join("a", "b"):     {"a", "b"},
+		"..a":                       {"..a"},
+		"a..":                       {"a.."},
+		filepath.Join("a", "...b"):  {"a", "...b"},
+		filepath.Join("x y", "z&w"): {"x y", "z&w"},
+	}
+	for want, parts := range good {
+		got, err := safeJoin(parts)
+		if err != nil {
+			t.Errorf("safeJoin(%q): unexpected error %v", parts, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("safeJoin(%q) = %q, want %q", parts, got, want)
+		}
+	}
+}
+
+func TestParsePiecesConsistency(t *testing.T) {
+	base := func(pieces string, length int64) map[string]interface{} {
+		return map[string]interface{}{
+			"name": "f", "piece length": int64(MinPieceLength), "pieces": pieces,
+			"length": length,
+		}
+	}
+	t.Run("not multiple of 20", func(t *testing.T) {
+		_, err := Parse(encodeInfoTorrent(t, base(strings.Repeat("\x00", 21), 4)))
+		if err == nil || !strings.Contains(err.Error(), "multiple of 20") {
+			t.Errorf("expected 'multiple of 20' error, got %v", err)
+		}
+	})
+	t.Run("count mismatch too few", func(t *testing.T) {
+		// 2 pieces worth of data but only 1 hash.
+		_, err := Parse(encodeInfoTorrent(t, base(strings.Repeat("\x00", 20), int64(MinPieceLength)+1)))
+		if err == nil {
+			t.Error("expected piece count mismatch error, got nil")
+		}
+	})
+	t.Run("count mismatch too many", func(t *testing.T) {
+		// 1 piece worth of data but 2 hashes.
+		_, err := Parse(encodeInfoTorrent(t, base(strings.Repeat("\x00", 40), 4)))
+		if err == nil {
+			t.Error("expected piece count mismatch error, got nil")
+		}
+	})
+	t.Run("count matches", func(t *testing.T) {
+		meta, err := Parse(encodeInfoTorrent(t, base(strings.Repeat("\x00", 40), int64(MinPieceLength)+1)))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if meta.PieceCount != 2 {
+			t.Errorf("piece count = %d, want 2", meta.PieceCount)
+		}
+		if len(meta.Pieces) != 40 {
+			t.Errorf("pieces len = %d, want 40", len(meta.Pieces))
+		}
+	})
+	t.Run("multi-file count matches", func(t *testing.T) {
+		info := map[string]interface{}{
+			"name": "ds", "piece length": int64(MinPieceLength), "pieces": strings.Repeat("\x00", 40),
+			"files": []interface{}{
+				map[string]interface{}{"length": int64(MinPieceLength), "path": []interface{}{"a"}},
+				map[string]interface{}{"length": int64(1), "path": []interface{}{"b"}},
+			},
+		}
+		if _, err := Parse(encodeInfoTorrent(t, info)); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("empty file zero pieces", func(t *testing.T) {
+		meta, err := Parse(encodeInfoTorrent(t, base("", 0)))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if meta.PieceCount != 0 {
+			t.Errorf("piece count = %d, want 0", meta.PieceCount)
+		}
+	})
+	t.Run("pieces absent leaves Pieces nil", func(t *testing.T) {
+		info := map[string]interface{}{
+			"name": "f", "piece length": int64(MinPieceLength), "length": int64(MinPieceLength) + 1,
+		}
+		meta, err := Parse(encodeInfoTorrent(t, info))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if meta.Pieces != nil {
+			t.Error("Pieces should be nil when absent")
+		}
+		if meta.PieceCount != 2 {
+			t.Errorf("piece count = %d, want 2", meta.PieceCount)
+		}
+	})
 }

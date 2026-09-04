@@ -173,39 +173,64 @@ func (p *PeerConn) Handshake(ctx context.Context, infoHash []byte, peerID string
 	return nil
 }
 
-// readExtendedHandshake reads the peer's BEP 10 handshake dictionary.
+// maxPreExtHandshakeMsgs bounds how many non-handshake messages we tolerate
+// while waiting for the peer's BEP 10 handshake. Real clients routinely send
+// bitfield / have / have-all / keep-alive first; a peer that never gets round
+// to the handshake is dropped rather than read forever.
+const maxPreExtHandshakeMsgs = 16
+
+// readExtendedHandshake reads the peer's BEP 10 handshake dictionary, skipping
+// any ordinary PWP messages (bitfield, have, keep-alive, ...) that arrive first.
+//
+// It reads via the package-level ReadMessage so the deadline Handshake set on
+// the conn stays in force for the whole phase; p.ReadMessage would replace it
+// with the 2-minute steady-state timeout on every message, letting a peer that
+// trickles keep-alives hold the worker for up to 16 x 2 minutes.
 func (p *PeerConn) readExtendedHandshake() error {
-	m, err := p.ReadMessage()
-	if err != nil {
-		return err
-	}
-	if m == KeepAlive {
-		return fmt.Errorf("expected extended handshake, got keep-alive")
-	}
-	if m.ID != MsgExtended {
-		return fmt.Errorf("expected extended message (20), got %d", m.ID)
-	}
-	if len(m.Payload) < 2 {
-		return fmt.Errorf("extended message payload too short")
-	}
-	if m.Payload[0] != 0 {
-		return fmt.Errorf("expected extended handshake (id 0), got %d", m.Payload[0])
-	}
+	for n := 0; n < maxPreExtHandshakeMsgs; n++ {
+		m, err := ReadMessage(p.conn)
+		if err != nil {
+			return err
+		}
+		if m == KeepAlive {
+			continue
+		}
+		switch m.ID {
+		case MsgExtended:
+			// fall through to validation below
+		case MsgChoke:
+			p.PeerChoking = true
+			continue
+		case MsgUnchoke:
+			p.PeerChoking = false
+			continue
+		default:
+			// bitfield, have, have-all, etc. — not ours to handle here.
+			continue
+		}
+		if len(m.Payload) < 2 {
+			return fmt.Errorf("extended message payload too short")
+		}
+		if m.Payload[0] != 0 {
+			return fmt.Errorf("expected extended handshake (id 0), got %d", m.Payload[0])
+		}
 
-	if err := wbencode.Validate(m.Payload[1:], wbencode.PeerMessageLimits); err != nil {
-		return fmt.Errorf("validate extended handshake: %w", err)
-	}
-	var handshake struct {
-		M        map[string]int `bencode:"m"`
-		Metadata int            `bencode:"metadata_size"`
-	}
-	if err := bencode.DecodeBytes(m.Payload[1:], &handshake); err != nil {
-		return fmt.Errorf("decode extended handshake: %w", err)
-	}
+		if err := wbencode.Validate(m.Payload[1:], wbencode.PeerMessageLimits); err != nil {
+			return fmt.Errorf("validate extended handshake: %w", err)
+		}
+		var handshake struct {
+			M        map[string]int `bencode:"m"`
+			Metadata int            `bencode:"metadata_size"`
+		}
+		if err := bencode.DecodeBytes(m.Payload[1:], &handshake); err != nil {
+			return fmt.Errorf("decode extended handshake: %w", err)
+		}
 
-	p.PeerExtensions = handshake.M
-	p.MetadataSize = handshake.Metadata
-	return nil
+		p.PeerExtensions = handshake.M
+		p.MetadataSize = handshake.Metadata
+		return nil
+	}
+	return fmt.Errorf("no extended handshake within %d messages", maxPreExtHandshakeMsgs)
 }
 
 // RequestMetadata sends a BEP 9 metadata request for the given piece.

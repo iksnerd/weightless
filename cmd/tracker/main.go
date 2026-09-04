@@ -59,6 +59,9 @@ func main() {
 		port = "8080"
 	}
 
+	// Expose the ldflags build version via the index page.
+	tracker.Version = version
+
 	http.HandleFunc("/announce", tracker.GlobalRateLimiter.LimitMiddleware(tracker.HandleAnnounce))
 	http.HandleFunc("/announce/", tracker.GlobalRateLimiter.LimitMiddleware(tracker.HandleAnnounce))
 	http.HandleFunc("/scrape", tracker.GlobalRateLimiter.LimitMiddleware(tracker.HandleScrape))
@@ -70,14 +73,30 @@ func main() {
 	http.Handle("/metrics", promhttp.Handler())
 	http.HandleFunc("/", tracker.IndexHandler)
 
-	srv := &http.Server{Addr: ":" + port}
+	// Timeouts guard against slowloris-style connections holding workers open.
+	// Announce/scrape/API requests are all small; the only large request is the
+	// registry POST, whose torrent_data is capped at 100MB, so 30s read/write
+	// is sufficient.
+	srv := &http.Server{
+		Addr:              ":" + port,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
-	// Graceful shutdown
+	// Graceful shutdown. srv.Shutdown closes the listeners first, which makes
+	// ListenAndServe below return ErrServerClosed immediately; shutdownDone
+	// keeps main alive until the final flush has completed.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		<-sigChan
 		log.Println("Shutting down... stopping tickers and flushing final state to DB")
+		// close(done) stops future ticks; a tick already mid-flush may overlap the
+		// final flush below, which SQLite's busy_timeout tolerates.
 		close(done)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -95,4 +114,6 @@ func main() {
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+	// Listeners are closed; wait for the signal goroutine to finish flushing.
+	<-shutdownDone
 }

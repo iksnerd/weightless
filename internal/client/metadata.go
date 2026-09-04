@@ -16,6 +16,14 @@ import (
 // DoS. 16 MiB is far larger than any real torrent info dict.
 const maxMetadataSize = 16 << 20
 
+// metadataPieceSize is the fixed BEP 9 piece size.
+const metadataPieceSize = 16384
+
+// maxMetadataSkipMsgs bounds how many unrelated messages we drain while
+// waiting for one ut_metadata reply. Peers freely interleave keep-alives,
+// have/bitfield and ut_pex; a peer that never answers is dropped.
+const maxMetadataSkipMsgs = 64
+
 // FetchMetadata fetches the info dictionary from a peer using BEP 9 metadata exchange.
 func (p *PeerConn) FetchMetadata(ctx context.Context, infoHash []byte) ([]byte, error) {
 	if p.MetadataSize <= 0 {
@@ -25,7 +33,7 @@ func (p *PeerConn) FetchMetadata(ctx context.Context, infoHash []byte) ([]byte, 
 		return nil, fmt.Errorf("metadata_size %d exceeds max %d", p.MetadataSize, maxMetadataSize)
 	}
 
-	numPieces := (p.MetadataSize + 16383) / 16384
+	numPieces := (p.MetadataSize + metadataPieceSize - 1) / metadataPieceSize
 	metadata := make([]byte, p.MetadataSize)
 
 	for i := 0; i < numPieces; i++ {
@@ -36,13 +44,9 @@ func (p *PeerConn) FetchMetadata(ctx context.Context, infoHash []byte) ([]byte, 
 			return nil, err
 		}
 
-		msg, err := p.ReadMessage()
+		msg, err := p.readMetadataReply()
 		if err != nil {
-			return nil, err
-		}
-
-		if msg == KeepAlive || msg.ID != MsgExtended {
-			return nil, fmt.Errorf("expected extended message, got %v", msg)
+			return nil, fmt.Errorf("metadata piece %d: %w", i, err)
 		}
 
 		if len(msg.Payload) < 2 {
@@ -77,14 +81,23 @@ func (p *PeerConn) FetchMetadata(ctx context.Context, infoHash []byte) ([]byte, 
 		if header.MsgType != 1 { // Data
 			return nil, fmt.Errorf("unexpected metadata msg_type %d", header.MsgType)
 		}
-
-		// Everything after the dict is the raw piece data
-		pieceData := msg.Payload[1+dictEnd:]
-		if len(pieceData) == 0 {
-			return nil, fmt.Errorf("metadata piece %d has no data", i)
+		if header.Piece != i {
+			return nil, fmt.Errorf("metadata piece mismatch: requested %d, got %d", i, header.Piece)
 		}
 
-		copy(metadata[i*16384:], pieceData)
+		// Everything after the dict is the raw piece data. Every piece is
+		// exactly metadataPieceSize bytes except the last, which carries the
+		// remainder — anything else is an off-spec peer, not a partial read.
+		pieceData := msg.Payload[1+dictEnd:]
+		wantLen := p.MetadataSize - i*metadataPieceSize
+		if wantLen > metadataPieceSize {
+			wantLen = metadataPieceSize
+		}
+		if len(pieceData) != wantLen {
+			return nil, fmt.Errorf("metadata piece %d: got %d bytes, want %d", i, len(pieceData), wantLen)
+		}
+
+		copy(metadata[i*metadataPieceSize:], pieceData)
 	}
 
 	// Verify info_hash
@@ -94,6 +107,29 @@ func (p *PeerConn) FetchMetadata(ctx context.Context, infoHash []byte) ([]byte, 
 	}
 
 	return metadata, nil
+}
+
+// readMetadataReply reads messages until one addressed to our ut_metadata
+// extension ID arrives. Keep-alives and ordinary PWP messages are skipped;
+// extended messages for other extensions are skipped too, except ut_pex,
+// which is routed to handlePexMessage so discovered peers aren't lost.
+func (p *PeerConn) readMetadataReply() (*Message, error) {
+	for n := 0; n < maxMetadataSkipMsgs; n++ {
+		msg, err := p.ReadMessage()
+		if err != nil {
+			return nil, err
+		}
+		if msg == KeepAlive || msg.ID != MsgExtended || len(msg.Payload) < 1 {
+			continue
+		}
+		switch msg.Payload[0] {
+		case localMetadataID:
+			return msg, nil
+		case localPexID:
+			p.handlePexMessage(msg.Payload[1:])
+		}
+	}
+	return nil, fmt.Errorf("no ut_metadata reply within %d messages", maxMetadataSkipMsgs)
 }
 
 // findBencodeEnd scans a byte slice starting with a bencoded value and returns

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/zeebo/bencode"
@@ -88,7 +89,13 @@ func TestAnnounce(t *testing.T) {
 	}))
 	defer server.Close()
 
-	peers, err := Announce(context.Background(), server.URL, "fakehash123456789012", "-WL0001-123456789012", 6881, 1024)
+	peers, err := Announce(context.Background(), server.URL, AnnounceOptions{
+		InfoHash: "fakehash123456789012",
+		PeerID:   "-WL0001-123456789012",
+		Port:     6881,
+		Left:     1024,
+		Event:    EventStarted,
+	})
 	if err != nil {
 		t.Fatalf("Announce failed: %v", err)
 	}
@@ -112,11 +119,70 @@ func TestAnnounceFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := Announce(context.Background(), server.URL, "hash", "peer", 6881, 0)
+	_, err := Announce(context.Background(), server.URL, AnnounceOptions{InfoHash: "hash", PeerID: "peer", Port: 6881})
 	if err == nil {
 		t.Fatal("expected error from tracker failure")
 	}
 	if err.Error() != "tracker failure: test failure" {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// The tracker's usage accounting and completion counter key off these
+// fields, so every one of them must reach the wire verbatim.
+func TestAnnounceSendsStatsAndEvent(t *testing.T) {
+	t.Parallel()
+	var got url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		data, _ := bencode.EncodeBytes(map[string]interface{}{"interval": 1800, "peers": ""})
+		w.Write(data)
+	}))
+	defer server.Close()
+
+	_, err := Announce(context.Background(), server.URL, AnnounceOptions{
+		InfoHash:   "fakehash123456789012",
+		PeerID:     "-WL0001-123456789012",
+		Port:       6881,
+		Uploaded:   0,
+		Downloaded: 4096,
+		Left:       0,
+		Event:      EventCompleted,
+	})
+	if err != nil {
+		t.Fatalf("Announce: %v", err)
+	}
+	want := map[string]string{
+		"uploaded":   "0",
+		"downloaded": "4096",
+		"left":       "0",
+		"event":      "completed",
+		"port":       "6881",
+		"compact":    "1",
+	}
+	for k, v := range want {
+		if got.Get(k) != v {
+			t.Errorf("%s = %q, want %q", k, got.Get(k), v)
+		}
+	}
+}
+
+// A periodic announce carries no event key at all (BEP 3), rather than an
+// empty one that some trackers reject.
+func TestAnnounceOmitsEmptyEvent(t *testing.T) {
+	t.Parallel()
+	var got url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		data, _ := bencode.EncodeBytes(map[string]interface{}{"interval": 1800, "peers": ""})
+		w.Write(data)
+	}))
+	defer server.Close()
+
+	if _, err := Announce(context.Background(), server.URL, AnnounceOptions{InfoHash: "h", PeerID: "p", Port: 1}); err != nil {
+		t.Fatalf("Announce: %v", err)
+	}
+	if _, present := got["event"]; present {
+		t.Errorf("event key present on periodic announce: %q", got.Get("event"))
 	}
 }

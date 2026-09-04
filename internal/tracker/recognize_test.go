@@ -144,7 +144,6 @@ func TestRecognize_Rejections(t *testing.T) {
 		// Event enum
 		{"event uppercase", [][2]string{{"event", "STARTED"}}, "event"},
 		{"event garbage", [][2]string{{"event", "garbage"}}, "event"},
-		{"event paused", [][2]string{{"event", "paused"}}, "event"},
 
 		// numwant bounds
 		{"numwant -1", [][2]string{{"numwant", "-1"}}, "numwant"},
@@ -183,6 +182,7 @@ func TestRecognize_AcceptsBoundaryValues(t *testing.T) {
 		{"compact 0", [][2]string{{"compact", "0"}}},
 		{"event stopped", [][2]string{{"event", "stopped"}}},
 		{"event completed", [][2]string{{"event", "completed"}}},
+		{"event paused", [][2]string{{"event", "paused"}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -200,6 +200,7 @@ func TestRecognize_EventMapping(t *testing.T) {
 		"started":   EventStarted,
 		"stopped":   EventStopped,
 		"completed": EventCompleted,
+		"paused":    EventPaused,
 	}
 	for raw, want := range cases {
 		t.Run("event="+raw, func(t *testing.T) {

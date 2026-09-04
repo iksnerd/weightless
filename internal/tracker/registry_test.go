@@ -275,9 +275,9 @@ func TestRegistryAuthRejectsWithoutKey(t *testing.T) {
 	DB = SetupTestDB(t)
 	defer DB.Close()
 
-	old := registryKey
-	registryKey = "secret123"
-	defer func() { registryKey = old }()
+	old := testRegistryKey
+	testRegistryKey = "secret123"
+	defer func() { testRegistryKey = old }()
 
 	body := `{"info_hash":"h1","name":"Test"}`
 	req := httptest.NewRequest("POST", "/api/registry", strings.NewReader(body))
@@ -294,9 +294,9 @@ func TestRegistryAuthRejectsWrongKey(t *testing.T) {
 	DB = SetupTestDB(t)
 	defer DB.Close()
 
-	old := registryKey
-	registryKey = "secret123"
-	defer func() { registryKey = old }()
+	old := testRegistryKey
+	testRegistryKey = "secret123"
+	defer func() { testRegistryKey = old }()
 
 	body := `{"info_hash":"h1","name":"Test"}`
 	req := httptest.NewRequest("POST", "/api/registry", strings.NewReader(body))
@@ -314,9 +314,9 @@ func TestRegistryAuthAcceptsCorrectKey(t *testing.T) {
 	DB = SetupTestDB(t)
 	defer DB.Close()
 
-	old := registryKey
-	registryKey = "secret123"
-	defer func() { registryKey = old }()
+	old := testRegistryKey
+	testRegistryKey = "secret123"
+	defer func() { testRegistryKey = old }()
 
 	body := `{"info_hash":"h1","name":"Test"}`
 	req := httptest.NewRequest("POST", "/api/registry", strings.NewReader(body))
@@ -334,9 +334,10 @@ func TestRegistryAuthNotRequiredWhenUnset(t *testing.T) {
 	DB = SetupTestDB(t)
 	defer DB.Close()
 
-	old := registryKey
-	registryKey = ""
-	defer func() { registryKey = old }()
+	old := testRegistryKey
+	testRegistryKey = ""
+	t.Setenv("REGISTRY_KEY", "")
+	defer func() { testRegistryKey = old }()
 
 	body := `{"info_hash":"h1","name":"Test"}`
 	req := httptest.NewRequest("POST", "/api/registry", strings.NewReader(body))
@@ -548,9 +549,10 @@ func TestRegistryDelete(t *testing.T) {
 	DB = SetupTestDB(t)
 	defer DB.Close()
 
-	old := registryKey
-	registryKey = ""
-	defer func() { registryKey = old }()
+	old := testRegistryKey
+	testRegistryKey = ""
+	t.Setenv("REGISTRY_KEY", "")
+	defer func() { testRegistryKey = old }()
 
 	// Create entry + peers
 	DB.Exec("INSERT INTO registry (info_hash, name, created_at) VALUES (?, ?, ?)", "badhash", "Bad", 0)
@@ -589,9 +591,9 @@ func TestRegistryDeleteRequiresKey(t *testing.T) {
 	DB = SetupTestDB(t)
 	defer DB.Close()
 
-	old := registryKey
-	registryKey = "secret"
-	defer func() { registryKey = old }()
+	old := testRegistryKey
+	testRegistryKey = "secret"
+	defer func() { testRegistryKey = old }()
 
 	req := httptest.NewRequest("DELETE", "/api/registry?info_hash=h1", nil)
 	w := httptest.NewRecorder()
@@ -606,9 +608,9 @@ func TestRegistryDeleteWithCorrectKey(t *testing.T) {
 	DB = SetupTestDB(t)
 	defer DB.Close()
 
-	old := registryKey
-	registryKey = "secret"
-	defer func() { registryKey = old }()
+	old := testRegistryKey
+	testRegistryKey = "secret"
+	defer func() { testRegistryKey = old }()
 
 	DB.Exec("INSERT INTO registry (info_hash, name, created_at) VALUES (?, ?, ?)", "h1", "Test", 0)
 
@@ -661,9 +663,10 @@ func TestRegistryDeleteDBError(t *testing.T) {
 	DB = SetupTestDB(t)
 	defer DB.Close()
 
-	old := registryKey
-	registryKey = ""
-	defer func() { registryKey = old }()
+	old := testRegistryKey
+	testRegistryKey = ""
+	t.Setenv("REGISTRY_KEY", "")
+	defer func() { testRegistryKey = old }()
 
 	// Insert entry so the hash param is valid
 	DB.Exec("INSERT INTO registry (info_hash, name, created_at) VALUES (?, ?, ?)", "h1", "Test", 0)
@@ -691,4 +694,217 @@ func TestRegistryDeleteMissingHash(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("Expected 400, got %d", w.Code)
 	}
+}
+
+// --- REGISTRY_KEY late-binding (bug: key captured at package init) ---
+
+// A key that lands in the environment AFTER package init (e.g. loaded from
+// .env.local by InitConfig -> loadEnv) must still gate the write API.
+func TestRegistryKeyReadFromEnvAfterInit(t *testing.T) {
+	DB = SetupTestDB(t)
+	defer DB.Close()
+
+	old := testRegistryKey
+	testRegistryKey = ""
+	defer func() { testRegistryKey = old }()
+	t.Setenv("REGISTRY_KEY", "late-bound-key")
+
+	body := `{"info_hash":"h1","name":"Test"}`
+
+	// No header -> 401
+	req := httptest.NewRequest("POST", "/api/registry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	HandleAPI(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("POST without key: expected 401, got %d", w.Code)
+	}
+
+	// DELETE without header -> 401
+	req = httptest.NewRequest("DELETE", "/api/registry?info_hash=h1", nil)
+	w = httptest.NewRecorder()
+	HandleAPI(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("DELETE without key: expected 401, got %d", w.Code)
+	}
+
+	// Correct header -> 201
+	req = httptest.NewRequest("POST", "/api/registry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Weightless-Key", "late-bound-key")
+	w = httptest.NewRecorder()
+	HandleAPI(w, req)
+	if w.Code != http.StatusCreated {
+		t.Errorf("POST with key: expected 201, got %d", w.Code)
+	}
+}
+
+// --- v1 hash lookups (bug: only the v2 info_hash column was matched) ---
+
+const (
+	hybridV2 = "a2c5e2b4f8d0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e"
+	hybridV1 = "0123456789abcdef0123456789abcdef01234567"
+)
+
+// minimalTorrent is a bencoded single-file torrent that torrent.Parse accepts.
+var minimalTorrent = []byte("d4:infod6:lengthi0e4:name6:hybrid12:piece lengthi16384e6:pieces0:ee")
+
+func insertHybrid(t *testing.T, data []byte) {
+	t.Helper()
+	if _, err := DB.Exec("INSERT INTO registry (info_hash, v1_info_hash, name, created_at, torrent_data) VALUES (?, ?, ?, ?, ?)",
+		hybridV2, hybridV1, "hybrid", 0, data); err != nil {
+		t.Fatalf("insert hybrid: %v", err)
+	}
+}
+
+func TestRegistryGetByV1Hash(t *testing.T) {
+	DB = SetupTestDB(t)
+	defer DB.Close()
+	insertHybrid(t, nil)
+
+	req := httptest.NewRequest("GET", "/api/registry?info_hash="+hybridV1, nil)
+	w := httptest.NewRecorder()
+	HandleAPI(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200 looking up by v1 hash, got %d", w.Code)
+	}
+	var entry registryEntry
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if entry.InfoHash != hybridV2 || entry.V1InfoHash != hybridV1 {
+		t.Errorf("Unexpected entry: %+v", entry)
+	}
+}
+
+func TestHandleTorrentDownloadByV1Hash(t *testing.T) {
+	DB = SetupTestDB(t)
+	defer DB.Close()
+	insertHybrid(t, minimalTorrent)
+
+	req := httptest.NewRequest("GET", "/api/registry/torrent?info_hash="+hybridV1, nil)
+	w := httptest.NewRecorder()
+	HandleTorrentDownload(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200 downloading by v1 hash, got %d", w.Code)
+	}
+	if !bytesEqual(w.Body.Bytes(), minimalTorrent) {
+		t.Error("Downloaded torrent data mismatch")
+	}
+}
+
+func TestHandleMetadataByV1Hash(t *testing.T) {
+	DB = SetupTestDB(t)
+	defer DB.Close()
+	insertHybrid(t, minimalTorrent)
+
+	// Sanity: v2 lookup still works.
+	req := httptest.NewRequest("GET", "/api/registry/metadata?info_hash="+hybridV2, nil)
+	w := httptest.NewRecorder()
+	HandleMetadata(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200 for v2 hash, got %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", "/api/registry/metadata?info_hash="+hybridV1, nil)
+	w = httptest.NewRecorder()
+	HandleMetadata(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200 for metadata by v1 hash, got %d: %s", w.Code, w.Body.String())
+	}
+	var meta struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&meta); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if meta.Name != "hybrid" {
+		t.Errorf("Expected name 'hybrid', got %q", meta.Name)
+	}
+}
+
+// --- DELETE tears down both swarms (bug: v1 swarm left alive) ---
+
+func assertHybridTornDown(t *testing.T) {
+	t.Helper()
+	var count int
+	DB.QueryRow("SELECT COUNT(*) FROM registry WHERE info_hash = ? OR v1_info_hash = ?", hybridV2, hybridV2).Scan(&count)
+	if count != 0 {
+		t.Error("Registry entry should be deleted")
+	}
+	for _, h := range []string{hybridV2, hybridV1} {
+		DB.QueryRow("SELECT COUNT(*) FROM peers WHERE info_hash = ?", h).Scan(&count)
+		if count != 0 {
+			t.Errorf("Peers for %s should be deleted from DB", h)
+		}
+		State.mu.RLock()
+		_, alive := State.Peers[h]
+		State.mu.RUnlock()
+		if alive {
+			t.Errorf("In-memory swarm for %s should be gone", h)
+		}
+		var reason string
+		if err := DB.QueryRow("SELECT reason FROM blocklist WHERE info_hash = ?", h).Scan(&reason); err != nil {
+			t.Errorf("%s should be blocklisted: %v", h, err)
+		} else if reason != "dmca" {
+			t.Errorf("Expected reason 'dmca' for %s, got %q", h, reason)
+		}
+	}
+}
+
+func seedHybridSwarms(t *testing.T) {
+	t.Helper()
+	insertHybrid(t, nil)
+	for _, h := range []string{hybridV2, hybridV1} {
+		DB.Exec("INSERT INTO peers (info_hash, peer_id, addr, updated_at) VALUES (?, ?, ?, ?)", h, "p-"+h[:4], "1.2.3.4:6881", 0)
+	}
+	State.mu.Lock()
+	State.Peers = make(map[string]map[string]*Peer)
+	State.mu.Unlock()
+	State.UpdatePeer(hybridV2, "peer-v2", &Peer{Addr: "1.2.3.4:6881"})
+	State.UpdatePeer(hybridV1, "peer-v1", &Peer{Addr: "5.6.7.8:6881", Left: 100})
+}
+
+func TestRegistryDeleteHybridTearsDownBothSwarms(t *testing.T) {
+	DB = SetupTestDB(t)
+	defer DB.Close()
+
+	old := testRegistryKey
+	testRegistryKey = ""
+	t.Setenv("REGISTRY_KEY", "")
+	defer func() { testRegistryKey = old }()
+
+	seedHybridSwarms(t)
+
+	req := httptest.NewRequest("DELETE", "/api/registry?info_hash="+hybridV2+"&reason=dmca", nil)
+	w := httptest.NewRecorder()
+	HandleAPI(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	assertHybridTornDown(t)
+}
+
+// The takedown may name the v1 hash (what a v1-only client / magnet carries).
+func TestRegistryDeleteByV1HashTearsDownBothSwarms(t *testing.T) {
+	DB = SetupTestDB(t)
+	defer DB.Close()
+
+	old := testRegistryKey
+	testRegistryKey = ""
+	t.Setenv("REGISTRY_KEY", "")
+	defer func() { testRegistryKey = old }()
+
+	seedHybridSwarms(t)
+
+	req := httptest.NewRequest("DELETE", "/api/registry?info_hash="+hybridV1+"&reason=dmca", nil)
+	w := httptest.NewRecorder()
+	HandleAPI(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	assertHybridTornDown(t)
 }
