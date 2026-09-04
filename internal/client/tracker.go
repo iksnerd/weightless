@@ -15,8 +15,28 @@ import (
 	wbencode "weightless/internal/bencode"
 )
 
+// Announce events per BEP 3. An empty Event is a plain periodic announce.
+const (
+	EventStarted   = "started"
+	EventCompleted = "completed"
+	EventStopped   = "stopped"
+)
+
+// AnnounceOptions carries the per-announce parameters. Uploaded/Downloaded/Left
+// are reported to the tracker verbatim; the caller is responsible for keeping
+// them honest (this client never seeds, so Uploaded stays 0).
+type AnnounceOptions struct {
+	InfoHash   string // raw 20-byte v1 info hash (binary, not hex)
+	PeerID     string // 20-byte BEP 20 peer id
+	Port       int
+	Uploaded   int64
+	Downloaded int64
+	Left       int64
+	Event      string // EventStarted, EventCompleted, EventStopped, or "" for periodic
+}
+
 // Announce sends a request to the tracker and returns a list of peer addresses (IP:Port).
-func Announce(ctx context.Context, trackerURL, infoHash, peerID string, port int, left int64) ([]string, error) {
+func Announce(ctx context.Context, trackerURL string, opts AnnounceOptions) ([]string, error) {
 	u, err := url.Parse(trackerURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid tracker url: %w", err)
@@ -25,14 +45,16 @@ func Announce(ctx context.Context, trackerURL, infoHash, peerID string, port int
 	q := u.Query()
 	// Must not be URL encoded by url.Values as it's binary data,
 	// but url.Values.Encode() will percent-encode it which is correct for BEP 3
-	q.Set("info_hash", infoHash)
-	q.Set("peer_id", peerID)
-	q.Set("port", strconv.Itoa(port))
-	q.Set("uploaded", "0")
-	q.Set("downloaded", "0")
-	q.Set("left", strconv.FormatInt(left, 10))
+	q.Set("info_hash", opts.InfoHash)
+	q.Set("peer_id", opts.PeerID)
+	q.Set("port", strconv.Itoa(opts.Port))
+	q.Set("uploaded", strconv.FormatInt(opts.Uploaded, 10))
+	q.Set("downloaded", strconv.FormatInt(opts.Downloaded, 10))
+	q.Set("left", strconv.FormatInt(opts.Left, 10))
 	q.Set("compact", "1") // We only support compact peer lists
-	q.Set("event", "started")
+	if opts.Event != "" {
+		q.Set("event", opts.Event)
+	}
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)

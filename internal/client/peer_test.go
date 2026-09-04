@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/zeebo/bencode"
 )
@@ -234,5 +235,130 @@ func TestRequestMetadataBeforeExtendedRejected(t *testing.T) {
 
 	if err := p.RequestMetadata(0); err == nil {
 		t.Error("RequestMetadata before extended handshake should fail")
+	}
+}
+
+// extHandshakePeer accepts one connection, echoes the BEP 3 handshake with
+// the BEP 10 bit set, reads the client's extended handshake, then writes
+// each message in pre before finally sending the extended handshake dict
+// (unless sendHandshake is false). It then keeps the conn open.
+func extHandshakePeer(t *testing.T, pre []*Message, sendHandshake bool) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 68)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			return
+		}
+		conn.Write(buf) // echo: same info hash, BEP 10 bit preserved
+		ReadMessage(conn)
+		for _, m := range pre {
+			if err := WriteMessage(conn, m); err != nil {
+				return
+			}
+		}
+		if sendHandshake {
+			data, _ := bencode.EncodeBytes(map[string]interface{}{
+				"m":             map[string]int{"ut_metadata": 1},
+				"metadata_size": 321,
+			})
+			WriteMessage(conn, &Message{ID: MsgExtended, Payload: append([]byte{0}, data...)})
+		}
+		io.Copy(io.Discard, conn)
+	}()
+	return ln.Addr().String()
+}
+
+// Real clients (Transmission, libtorrent) send bitfield / have / keep-alive
+// before their BEP 10 handshake. The handshake must tolerate that.
+func TestHandshakeSkipsMessagesBeforeExtended(t *testing.T) {
+	infoHash := make([]byte, 20)
+	copy(infoHash, "infohash123456789012")
+
+	pre := []*Message{
+		{ID: MsgBitfield, Payload: []byte{0xff, 0x80}},
+		KeepAlive,
+		{ID: MsgHave, Payload: []byte{0, 0, 0, 3}},
+		{ID: MsgUnchoke},
+	}
+	addr := extHandshakePeer(t, pre, true)
+	p, err := Connect(context.Background(), addr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer p.Close()
+
+	if err := p.Handshake(context.Background(), infoHash, "-WL0001-123456789012"); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	if p.PeerExtensions["ut_metadata"] != 1 {
+		t.Errorf("PeerExtensions = %v, want ut_metadata=1", p.PeerExtensions)
+	}
+	if p.MetadataSize != 321 {
+		t.Errorf("MetadataSize = %d, want 321", p.MetadataSize)
+	}
+	if p.PeerChoking {
+		t.Error("Unchoke received before the extended handshake was not recorded")
+	}
+}
+
+// A peer that floods ordinary messages and never sends the extended
+// handshake is dropped after a bounded number of reads.
+func TestHandshakeGivesUpWithoutExtended(t *testing.T) {
+	infoHash := make([]byte, 20)
+	copy(infoHash, "infohash123456789012")
+
+	pre := make([]*Message, 0, maxPreExtHandshakeMsgs+4)
+	for i := 0; i < maxPreExtHandshakeMsgs+4; i++ {
+		pre = append(pre, &Message{ID: MsgHave, Payload: []byte{0, 0, 0, byte(i)}})
+	}
+	addr := extHandshakePeer(t, pre, true) // handshake comes too late to count
+	p, err := Connect(context.Background(), addr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer p.Close()
+
+	err = p.Handshake(context.Background(), infoHash, "-WL0001-123456789012")
+	if err == nil {
+		t.Fatal("expected handshake to give up")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("no extended handshake within")) {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// A peer that completes the BEP 3 handshake but then goes silent must not
+// hold the connection past the handshake deadline: the ctx deadline bounds
+// the extended-handshake phase too, not just the first 68 bytes.
+func TestHandshakeHonoursDeadlineWaitingForExtended(t *testing.T) {
+	infoHash := make([]byte, 20)
+	copy(infoHash, "infohash123456789012")
+
+	addr := extHandshakePeer(t, nil, false) // echoes handshake, then silence
+	p, err := Connect(context.Background(), addr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer p.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = p.Handshake(ctx, infoHash, "-WL0001-123456789012")
+	if err == nil {
+		t.Fatal("expected handshake to time out waiting for extended handshake")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("handshake blocked %v; the ctx deadline (500ms) should have bounded it", elapsed)
 	}
 }

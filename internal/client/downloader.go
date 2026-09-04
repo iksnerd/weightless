@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 )
 
 const (
@@ -23,13 +24,31 @@ type DownloadOptions struct {
 	MaxWorkers int // Max concurrent peer connections (default: 5)
 }
 
+// announceGrace bounds the best-effort completed/stopped announces. They use a
+// fresh background context so a cancelled download ctx doesn't suppress them.
+const announceGrace = 5 * time.Second
+
 // DownloadMVP implements the Stage C concurrent downloader.
 func DownloadMVP(ctx context.Context, opts DownloadOptions) error {
-	peerID := generatePeerID()
-	log.Printf("Starting download for %s", opts.Meta.Name)
+	meta := opts.Meta
+
+	// Guard: the swarm needs one 20-byte SHA-1 per piece. A v2-only or
+	// truncated torrent would otherwise make every piece fail the hash-index
+	// range check in the worker, and the collector would re-enqueue them
+	// forever (the exhaustion supervisor never fires while inFlight > 0).
+	if len(meta.Pieces) == 0 {
+		return fmt.Errorf("torrent has no v1 piece hashes (v2-only torrents are not supported yet)")
+	}
+	if want := meta.PieceCount * 20; len(meta.Pieces) != want {
+		return fmt.Errorf("torrent piece hashes length mismatch: got %d bytes, want %d (%d pieces x 20)",
+			len(meta.Pieces), want, meta.PieceCount)
+	}
+
+	peerID := GeneratePeerID()
+	log.Printf("Starting download for %s", meta.Name)
 
 	// 1. Storage Initialization
-	store := NewStorage(opts.OutputDir, opts.Meta.Files)
+	store := NewStorage(opts.OutputDir, meta.Files)
 	if err := store.Preallocate(); err != nil {
 		return fmt.Errorf("preallocate: %w", err)
 	}
@@ -40,11 +59,28 @@ func DownloadMVP(ctx context.Context, opts DownloadOptions) error {
 		announceURL = strings.TrimSuffix(announceURL, "/") + "/announce"
 	}
 
-	addrs, err := Announce(ctx, announceURL, string(opts.Meta.InfoHashV1), peerID, 6881, opts.Meta.TotalSize)
+	// Uploaded stays 0 throughout: this client never seeds, so reporting
+	// anything else would be a lie to the tracker's usage accounting.
+	base := AnnounceOptions{
+		InfoHash: string(meta.InfoHashV1),
+		PeerID:   peerID,
+		Port:     6881,
+		Left:     meta.TotalSize,
+	}
+
+	started := base
+	started.Event = EventStarted
+	addrs, err := Announce(ctx, announceURL, started)
 	if err != nil {
 		return fmt.Errorf("announce: %w", err)
 	}
+	// From here on we are registered in the swarm: every exit path must tell
+	// the tracker we left, or we linger as a phantom peer until it expires us.
+	stopped := base
+	stopped.Event = EventStopped
+
 	if len(addrs) == 0 {
+		bestEffortAnnounce(announceURL, stopped)
 		return fmt.Errorf("no peers found")
 	}
 	log.Printf("Found %d peers.", len(addrs))
@@ -54,13 +90,37 @@ func DownloadMVP(ctx context.Context, opts DownloadOptions) error {
 	if maxWorkers <= 0 {
 		maxWorkers = 5
 	}
-	swarm := NewSwarm(opts.Meta, maxWorkers)
-	if err := swarm.Start(ctx, addrs, opts.Meta.InfoHashV1, peerID, store); err != nil {
+	swarm := NewSwarm(meta, maxWorkers)
+	if err := swarm.Start(ctx, addrs, meta.InfoHashV1, peerID, store); err != nil {
+		bestEffortAnnounce(announceURL, stopped)
 		return fmt.Errorf("swarm download: %w", err)
 	}
 
-	fmt.Printf("\nSuccess! Downloaded %s to %s\n", opts.Meta.Name, opts.OutputDir)
+	// 4. Report completion so the tracker counts it, then leave the swarm:
+	//    we exit right after and don't seed, so staying registered would
+	//    advertise a seeder that no longer exists.
+	completed := base
+	completed.Event = EventCompleted
+	completed.Downloaded = meta.TotalSize
+	completed.Left = 0
+	bestEffortAnnounce(announceURL, completed)
+	stopped.Downloaded = meta.TotalSize
+	stopped.Left = 0
+	bestEffortAnnounce(announceURL, stopped)
+
+	fmt.Printf("\nSuccess! Downloaded %s to %s\n", meta.Name, opts.OutputDir)
 	return nil
+}
+
+// bestEffortAnnounce sends a lifecycle announce (completed/stopped) that must
+// never fail the download. It runs on its own short-lived background context
+// so it still fires when the caller's ctx has already been cancelled.
+func bestEffortAnnounce(announceURL string, opts AnnounceOptions) {
+	ctx, cancel := context.WithTimeout(context.Background(), announceGrace)
+	defer cancel()
+	if _, err := Announce(ctx, announceURL, opts); err != nil {
+		log.Printf("announce event=%s failed (ignored): %v", opts.Event, err)
+	}
 }
 
 // dialAndHandshake connects to a single peer, performs the BEP 3/10 handshake,
@@ -182,17 +242,9 @@ func blockSize(pieceSize, downloaded int) int {
 	return rem
 }
 
-func formatPieceSize(n int) string {
-	if n >= 1<<20 {
-		return fmt.Sprintf("%.1f MB", float64(n)/float64(1<<20))
-	}
-	if n >= 1<<10 {
-		return fmt.Sprintf("%.1f KB", float64(n)/float64(1<<10))
-	}
-	return fmt.Sprintf("%d B", n)
-}
-
-func generatePeerID() string {
+// GeneratePeerID returns a fresh 20-byte BEP 20 peer id ("-WL0020-" + 12
+// random alphanumerics). Shared by the downloader and the wl CLI.
+func GeneratePeerID() string {
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, 12)
 	// crypto/rand so two clients started in the same instant don't collide.

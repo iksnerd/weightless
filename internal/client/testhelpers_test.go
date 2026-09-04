@@ -18,6 +18,13 @@ func listenTCP(t *testing.T) (net.Listener, error) {
 // advertises metadata_size in the extended handshake and answers metadata
 // requests with the bytes of metaBytes in 16 KiB pieces.
 func serveMetadataPeer(conn net.Conn, metaBytes []byte) {
+	serveMetadataPeerWith(conn, metaBytes, nil)
+}
+
+// serveMetadataPeerWith is serveMetadataPeer with a hook: if preReply is
+// non-nil it is invoked before every ut_metadata data reply, so a test can
+// interleave unrelated traffic (PEX, keep-alive, have) the way real peers do.
+func serveMetadataPeerWith(conn net.Conn, metaBytes []byte, preReply func(conn net.Conn, piece int)) {
 	defer conn.Close()
 
 	buf := make([]byte, 68)
@@ -31,7 +38,7 @@ func serveMetadataPeer(conn net.Conn, metaBytes []byte) {
 	ReadMessage(conn) // client's extended handshake
 
 	extPayload, _ := bencode.EncodeBytes(map[string]interface{}{
-		"m":             map[string]int{"ut_metadata": 1},
+		"m":             map[string]int{"ut_metadata": 1, "ut_pex": 2},
 		"metadata_size": len(metaBytes),
 	})
 	WriteMessage(conn, &Message{ID: MsgExtended, Payload: append([]byte{0}, extPayload...)})
@@ -64,7 +71,10 @@ func serveMetadataPeer(conn net.Conn, metaBytes []byte) {
 			"piece":      req.Piece,
 			"total_size": len(metaBytes),
 		})
-		payload := append([]byte{1}, header...) // ext id (arbitrary) + header
+		if preReply != nil {
+			preReply(conn, req.Piece)
+		}
+		payload := append([]byte{localMetadataID}, header...) // addressed to OUR ut_metadata id
 		payload = append(payload, metaBytes[start:end]...)
 		WriteMessage(conn, &Message{ID: MsgExtended, Payload: payload})
 	}
