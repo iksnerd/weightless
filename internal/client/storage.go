@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Storage handles writing piece data to the correct files on disk.
@@ -12,18 +13,47 @@ type Storage struct {
 	files   []FileEntry
 }
 
-// NewStorage creates a new storage manager.
+// NewStorage creates a new storage manager. baseDir is normalised to a clean
+// absolute path so that resolve can do a reliable containment check.
 func NewStorage(baseDir string, files []FileEntry) *Storage {
+	abs, err := filepath.Abs(baseDir)
+	if err != nil {
+		abs = filepath.Clean(baseDir)
+	}
 	return &Storage{
-		baseDir: baseDir,
+		baseDir: abs,
 		files:   files,
 	}
+}
+
+// resolve joins a torrent-supplied relative path onto baseDir and verifies
+// the result stays inside baseDir. The torrent parser already rejects ".."
+// and absolute components; this is defense in depth for any FileEntry that
+// reaches Storage by another route.
+func (s *Storage) resolve(rel string) (string, error) {
+	if rel == "" {
+		return "", fmt.Errorf("empty file path")
+	}
+	if filepath.IsAbs(rel) || filepath.VolumeName(rel) != "" {
+		return "", fmt.Errorf("absolute file path %q not allowed", rel)
+	}
+	joined := filepath.Clean(filepath.Join(s.baseDir, rel))
+	if joined == s.baseDir {
+		return "", fmt.Errorf("file path %q resolves to the download directory itself", rel)
+	}
+	if !strings.HasPrefix(joined, s.baseDir+string(filepath.Separator)) {
+		return "", fmt.Errorf("file path %q escapes download directory", rel)
+	}
+	return joined, nil
 }
 
 // Preallocate creates the necessary directories and files on disk.
 func (s *Storage) Preallocate() error {
 	for _, fe := range s.files {
-		path := filepath.Join(s.baseDir, fe.Path)
+		path, err := s.resolve(fe.Path)
+		if err != nil {
+			return err
+		}
 		dir := filepath.Dir(path)
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
@@ -78,7 +108,10 @@ func (s *Storage) WritePiece(pieceIndex int, pieceLength int, data []byte) error
 
 			toWrite := data[startInPiece:endInPiece]
 
-			path := filepath.Join(s.baseDir, fe.Path)
+			path, err := s.resolve(fe.Path)
+			if err != nil {
+				return err
+			}
 			f, err := os.OpenFile(path, os.O_RDWR, 0644)
 			if err != nil {
 				return err

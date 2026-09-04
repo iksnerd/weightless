@@ -109,3 +109,78 @@ func TestBlockSize(t *testing.T) {
 		t.Error("expected 100 for tiny piece")
 	}
 }
+
+func TestPreallocateRejectsPathTraversal(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "download")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []string{
+		"../escape",
+		"../../escape",
+		"sub/../../escape",
+		"..",
+		".",
+		"",
+		filepath.Join(parent, "abs-escape"),
+	}
+	for _, p := range cases {
+		s := NewStorage(dir, []FileEntry{{Path: p, Length: 16}})
+		if err := s.Preallocate(); err == nil {
+			t.Errorf("Preallocate(%q): expected error, got nil", p)
+		}
+		if err := s.WritePiece(0, 16, make([]byte, 16)); err == nil {
+			t.Errorf("WritePiece(%q): expected error, got nil", p)
+		}
+	}
+
+	// Nothing may have been created outside the download dir.
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "download" {
+			t.Errorf("unexpected entry outside download dir: %s", e.Name())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(parent, "escape")); !os.IsNotExist(err) {
+		t.Errorf("../escape was created (stat err = %v)", err)
+	}
+}
+
+func TestResolveContainment(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewStorage(dir, nil)
+
+	// A sibling directory sharing baseDir as a string prefix must not pass.
+	sibling := "../" + filepath.Base(dir) + "-sibling/x"
+	if _, err := s.resolve(sibling); err == nil {
+		t.Errorf("resolve(%q): expected error (prefix-sibling escape)", sibling)
+	}
+
+	got, err := s.resolve("a/b.txt")
+	if err != nil {
+		t.Fatalf("resolve(a/b.txt): %v", err)
+	}
+	want := filepath.Join(s.baseDir, "a", "b.txt")
+	if got != want {
+		t.Errorf("resolve = %q, want %q", got, want)
+	}
+	// Inner ".." that stays inside baseDir is tolerated by the containment
+	// check (the parser rejects it upstream anyway).
+	if _, err := s.resolve("a/../b.txt"); err != nil {
+		t.Errorf("resolve(a/../b.txt): unexpected error %v", err)
+	}
+}
+
+func TestNewStorageAbsBaseDir(t *testing.T) {
+	s := NewStorage("relative/dir", nil)
+	if !filepath.IsAbs(s.baseDir) {
+		t.Errorf("baseDir should be absolute, got %q", s.baseDir)
+	}
+}

@@ -179,9 +179,15 @@ func finalize(opts CreateOptions, infoDict *orderedDict, pieceLayers map[string]
 
 	hashHex := hex.EncodeToString(infoHash[:])
 	v1Hex := hex.EncodeToString(infoHashV1[:])
-	// Hybrid magnet: include both v1 (btih) and v2 (btmh) hashes
-	magnet := fmt.Sprintf("magnet:?xt=urn:btih:%s&xt=urn:btmh:1220%s&dn=%s&tr=%s",
-		v1Hex, hashHex, opts.Name, opts.AnnounceURL)
+	// Hybrid magnet: include both v1 (btih) and v2 (btmh) hashes. The xt
+	// values are fixed URN prefixes plus hex and need no escaping; dn and tr
+	// are user-supplied and go through url.Values so spaces, "&", "#" etc.
+	// cannot break the URI (ParseMagnet uses url.ParseQuery to decode).
+	q := url.Values{}
+	q.Set("dn", opts.Name)
+	q.Set("tr", opts.AnnounceURL)
+	magnet := fmt.Sprintf("magnet:?xt=urn:btih:%s&xt=urn:btmh:1220%s&%s",
+		v1Hex, hashHex, q.Encode())
 
 	return &CreateResult{
 		TorrentBytes:  torrentBytes,
