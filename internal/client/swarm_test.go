@@ -44,7 +44,7 @@ func TestSwarmShutdownNoLeak(t *testing.T) {
 	// Start a mock peer that serves the data
 	peerAddr := startTestPeer(t, piece0, piece1)
 
-	store := NewStorage(t.TempDir(), meta.Files)
+	store := newTestStorage(t, t.TempDir(), meta.Files)
 	store.Preallocate()
 
 	goroutinesBefore := runtime.NumGoroutine()
@@ -117,7 +117,7 @@ func twoPieceFixture(t *testing.T) (TorrentMeta, []byte, []byte, *Storage) {
 		Pieces:      pieces,
 		Files:       []FileEntry{{Path: "test.dat", Length: 24}},
 	}
-	store := NewStorage(t.TempDir(), meta.Files)
+	store := newTestStorage(t, t.TempDir(), meta.Files)
 	store.Preallocate()
 	return meta, append(piece0, piece1...), infoHash, store
 }

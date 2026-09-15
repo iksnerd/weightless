@@ -3,13 +3,25 @@ package client
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// newTestStorage creates a Storage for tests and closes its root on cleanup.
+func newTestStorage(t *testing.T, dir string, files []FileEntry) *Storage {
+	t.Helper()
+	s, err := NewStorage(dir, files)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
 
 func TestPreallocateSingleFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	s := NewStorage(dir, []FileEntry{{Path: "test.dat", Length: 1024}})
+	s := newTestStorage(t, dir, []FileEntry{{Path: "test.dat", Length: 1024}})
 
 	if err := s.Preallocate(); err != nil {
 		t.Fatal(err)
@@ -27,7 +39,7 @@ func TestPreallocateSingleFile(t *testing.T) {
 func TestPreallocateNestedDirs(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	s := NewStorage(dir, []FileEntry{
+	s := newTestStorage(t, dir, []FileEntry{
 		{Path: "sub/deep/a.txt", Length: 100},
 		{Path: "sub/b.txt", Length: 200},
 	})
@@ -49,7 +61,7 @@ func TestPreallocateNestedDirs(t *testing.T) {
 func TestWritePieceSingleFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	s := NewStorage(dir, []FileEntry{{Path: "out.dat", Length: 32}})
+	s := newTestStorage(t, dir, []FileEntry{{Path: "out.dat", Length: 32}})
 	s.Preallocate()
 
 	// Write piece 0 (first 16 bytes)
@@ -75,7 +87,7 @@ func TestWritePieceSpansFiles(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	// Two files: 10 bytes + 6 bytes = 16 bytes total, one piece
-	s := NewStorage(dir, []FileEntry{
+	s := newTestStorage(t, dir, []FileEntry{
 		{Path: "first.dat", Length: 10},
 		{Path: "second.dat", Length: 6},
 	})
@@ -128,7 +140,7 @@ func TestPreallocateRejectsPathTraversal(t *testing.T) {
 		filepath.Join(parent, "abs-escape"),
 	}
 	for _, p := range cases {
-		s := NewStorage(dir, []FileEntry{{Path: p, Length: 16}})
+		s := newTestStorage(t, dir, []FileEntry{{Path: p, Length: 16}})
 		if err := s.Preallocate(); err == nil {
 			t.Errorf("Preallocate(%q): expected error, got nil", p)
 		}
@@ -152,10 +164,44 @@ func TestPreallocateRejectsPathTraversal(t *testing.T) {
 	}
 }
 
+// TestPreallocateRejectsSymlinkEscape covers the gap a purely textual
+// containment check misses: a directory component under baseDir that is
+// actually a symlink pointing outside it (e.g. left behind by another
+// torrent sharing the same download directory). The file path itself
+// contains no "..", so string-prefix matching on the joined path would
+// wrongly call it contained; only refusing to follow the symlink (via
+// os.Root) catches it.
+func TestPreallocateRejectsSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on windows")
+	}
+	t.Parallel()
+
+	outside := t.TempDir()
+	dir := t.TempDir()
+
+	link := filepath.Join(dir, "shared")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newTestStorage(t, dir, []FileEntry{{Path: "shared/evil.dat", Length: 16}})
+	if err := s.Preallocate(); err == nil {
+		t.Error("Preallocate through a symlinked directory: expected error, got nil")
+	}
+	if err := s.WritePiece(0, 16, make([]byte, 16)); err == nil {
+		t.Error("WritePiece through a symlinked directory: expected error, got nil")
+	}
+
+	if _, err := os.Stat(filepath.Join(outside, "evil.dat")); !os.IsNotExist(err) {
+		t.Errorf("evil.dat was created outside baseDir via symlink (stat err = %v)", err)
+	}
+}
+
 func TestResolveContainment(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	s := NewStorage(dir, nil)
+	s := newTestStorage(t, dir, nil)
 
 	// A sibling directory sharing baseDir as a string prefix must not pass.
 	sibling := "../" + filepath.Base(dir) + "-sibling/x"
@@ -167,7 +213,7 @@ func TestResolveContainment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve(a/b.txt): %v", err)
 	}
-	want := filepath.Join(s.baseDir, "a", "b.txt")
+	want := filepath.Join("a", "b.txt")
 	if got != want {
 		t.Errorf("resolve = %q, want %q", got, want)
 	}
@@ -179,7 +225,8 @@ func TestResolveContainment(t *testing.T) {
 }
 
 func TestNewStorageAbsBaseDir(t *testing.T) {
-	s := NewStorage("relative/dir", nil)
+	t.Chdir(t.TempDir())
+	s := newTestStorage(t, "relative/dir", nil)
 	if !filepath.IsAbs(s.baseDir) {
 		t.Errorf("baseDir should be absolute, got %q", s.baseDir)
 	}

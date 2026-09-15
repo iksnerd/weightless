@@ -10,26 +10,47 @@ import (
 // Storage handles writing piece data to the correct files on disk.
 type Storage struct {
 	baseDir string
+	root    *os.Root
 	files   []FileEntry
 }
 
-// NewStorage creates a new storage manager. baseDir is normalised to a clean
-// absolute path so that resolve can do a reliable containment check.
-func NewStorage(baseDir string, files []FileEntry) *Storage {
+// NewStorage creates a new storage manager rooted at baseDir. baseDir is
+// created if missing and opened as an os.Root: every subsequent file
+// operation goes through that root, so the OS refuses to resolve a path
+// component through a symlink that would land outside baseDir, even if one
+// is planted there after this call (e.g. by another torrent sharing the same
+// download directory). A textual containment check on its own can't catch
+// that — the check and the open are two different syscalls, and the target
+// of a symlink can change, or come into existence, between them.
+func NewStorage(baseDir string, files []FileEntry) (*Storage, error) {
 	abs, err := filepath.Abs(baseDir)
 	if err != nil {
 		abs = filepath.Clean(baseDir)
 	}
+	if err := os.MkdirAll(abs, 0755); err != nil {
+		return nil, fmt.Errorf("create download dir %s: %w", abs, err)
+	}
+	root, err := os.OpenRoot(abs)
+	if err != nil {
+		return nil, fmt.Errorf("open download dir %s: %w", abs, err)
+	}
 	return &Storage{
 		baseDir: abs,
+		root:    root,
 		files:   files,
-	}
+	}, nil
 }
 
-// resolve joins a torrent-supplied relative path onto baseDir and verifies
-// the result stays inside baseDir. The torrent parser already rejects ".."
-// and absolute components; this is defense in depth for any FileEntry that
-// reaches Storage by another route.
+// Close releases the root directory handle.
+func (s *Storage) Close() error {
+	return s.root.Close()
+}
+
+// resolve validates a torrent-supplied relative file path and returns it
+// cleaned, still relative to baseDir. The torrent parser already rejects
+// ".." and absolute components; this is defense in depth for any FileEntry
+// that reaches Storage by another route. It does NOT resolve symlinks —
+// escape-via-symlink is instead prevented at the syscall level by s.root.
 func (s *Storage) resolve(rel string) (string, error) {
 	if rel == "" {
 		return "", fmt.Errorf("empty file path")
@@ -37,38 +58,39 @@ func (s *Storage) resolve(rel string) (string, error) {
 	if filepath.IsAbs(rel) || filepath.VolumeName(rel) != "" {
 		return "", fmt.Errorf("absolute file path %q not allowed", rel)
 	}
-	joined := filepath.Clean(filepath.Join(s.baseDir, rel))
-	if joined == s.baseDir {
+	cleaned := filepath.Clean(rel)
+	if cleaned == "." {
 		return "", fmt.Errorf("file path %q resolves to the download directory itself", rel)
 	}
-	if !strings.HasPrefix(joined, s.baseDir+string(filepath.Separator)) {
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("file path %q escapes download directory", rel)
 	}
-	return joined, nil
+	return cleaned, nil
 }
 
 // Preallocate creates the necessary directories and files on disk.
 func (s *Storage) Preallocate() error {
 	for _, fe := range s.files {
-		path, err := s.resolve(fe.Path)
+		rel, err := s.resolve(fe.Path)
 		if err != nil {
 			return err
 		}
-		dir := filepath.Dir(path)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", dir, err)
+		if dir := filepath.Dir(rel); dir != "." {
+			if err := s.root.MkdirAll(dir, 0755); err != nil {
+				return fmt.Errorf("mkdir %s: %w", dir, err)
+			}
 		}
 
 		// Create or open the file
-		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+		f, err := s.root.OpenFile(rel, os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
-			return fmt.Errorf("open %s: %w", path, err)
+			return fmt.Errorf("open %s: %w", rel, err)
 		}
 
 		// Preallocate size (simple truncate)
 		if err := f.Truncate(fe.Length); err != nil {
 			f.Close()
-			return fmt.Errorf("truncate %s: %w", path, err)
+			return fmt.Errorf("truncate %s: %w", rel, err)
 		}
 		f.Close()
 	}
@@ -108,11 +130,11 @@ func (s *Storage) WritePiece(pieceIndex int, pieceLength int, data []byte) error
 
 			toWrite := data[startInPiece:endInPiece]
 
-			path, err := s.resolve(fe.Path)
+			rel, err := s.resolve(fe.Path)
 			if err != nil {
 				return err
 			}
-			f, err := os.OpenFile(path, os.O_RDWR, 0644)
+			f, err := s.root.OpenFile(rel, os.O_RDWR, 0644)
 			if err != nil {
 				return err
 			}

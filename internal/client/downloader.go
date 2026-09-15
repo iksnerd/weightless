@@ -48,7 +48,11 @@ func DownloadMVP(ctx context.Context, opts DownloadOptions) error {
 	log.Printf("Starting download for %s", meta.Name)
 
 	// 1. Storage Initialization
-	store := NewStorage(opts.OutputDir, meta.Files)
+	store, err := NewStorage(opts.OutputDir, meta.Files)
+	if err != nil {
+		return fmt.Errorf("storage init: %w", err)
+	}
+	defer store.Close()
 	if err := store.Preallocate(); err != nil {
 		return fmt.Errorf("preallocate: %w", err)
 	}
@@ -160,7 +164,7 @@ func downloadPiece(ctx context.Context, p *PeerConn, index int, size int, expect
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		msg, err := p.ReadMessage()
+		msg, err := p.ReadMessage(ctx)
 		if err != nil {
 			return nil, err
 		}
