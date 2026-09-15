@@ -387,10 +387,28 @@ func runGet(opts getOpts) error {
 
 	// Save .torrent file. The magnet's dn is attacker-controlled, so reject
 	// (rather than reinterpret) anything that could escape outDir via
-	// filepath.Join instead of naming the file.
+	// filepath.Join instead of naming the file. Write through an os.Root
+	// rooted at outDir rather than os.WriteFile: a pre-existing symlink at
+	// the target path (planted by anything else sharing outDir) would
+	// otherwise make WriteFile follow it and overwrite a file outside
+	// outDir, since WriteFile does not distinguish "create" from
+	// "follow an existing symlink and truncate its target".
 	safeName := sanitizeFilename(name, hash[:16])
 	torrentFile := filepath.Join(outDir, safeName+".torrent")
-	if err := os.WriteFile(torrentFile, torrentBytes, 0644); err != nil {
+	outRoot, err := os.OpenRoot(outDir)
+	if err != nil {
+		return fmt.Errorf("open output directory %s: %w", outDir, err)
+	}
+	defer outRoot.Close()
+	f, err := outRoot.OpenFile(safeName+".torrent", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("write torrent file: %w", err)
+	}
+	if _, err := f.Write(torrentBytes); err != nil {
+		f.Close()
+		return fmt.Errorf("write torrent file: %w", err)
+	}
+	if err := f.Close(); err != nil {
 		return fmt.Errorf("write torrent file: %w", err)
 	}
 
