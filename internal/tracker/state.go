@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"sync"
@@ -208,10 +209,8 @@ func (s *SwarmState) FlushToDB() {
 	// Take a snapshot of peers to minimize lock time
 	snapshot := make(map[string]map[string]*Peer)
 	for hash, swarm := range s.Peers {
-		snapshot[hash] = make(map[string]*Peer)
-		for id, p := range swarm {
-			snapshot[hash][id] = p
-		}
+		snapshot[hash] = make(map[string]*Peer, len(swarm))
+		maps.Copy(snapshot[hash], swarm)
 	}
 	s.mu.RUnlock()
 
@@ -247,6 +246,34 @@ func (s *SwarmState) FlushToDB() {
 	}
 }
 
+// postUsageSync marshals payload and POSTs it to the Hub's usage-sync
+// endpoint, authenticated with REGISTRY_KEY when one is set. It returns the
+// response status code, or an error if the payload could not be built or the
+// request could not be completed at all.
+func postUsageSync(hubURL string, payload map[string]UserUsage, timeout time.Duration) (int, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, fmt.Errorf("marshal usage payload: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", hubURL+"/api/internal/usage-sync", bytes.NewBuffer(body))
+	if err != nil {
+		return 0, fmt.Errorf("create sync request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if key := os.Getenv("REGISTRY_KEY"); key != "" {
+		req.Header.Set("X-Weightless-Key", key)
+	}
+
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
 // FlushUsers sends in-memory usage deltas to the external Hub.
 // It is resilient: if the Hub is down, it keeps the deltas in RAM to try again later.
 func (s *SwarmState) FlushUsers() {
@@ -270,35 +297,14 @@ func (s *SwarmState) FlushUsers() {
 	}
 	s.mu.RUnlock()
 
-	// Real production-ready HTTP POST sync
-	body, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("Failed to marshal usage payload: %v", err)
-		return
-	}
-
-	req, err := http.NewRequest("POST", hubURL+"/api/internal/usage-sync", bytes.NewBuffer(body))
-	if err != nil {
-		log.Printf("Failed to create sync request: %v", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Secure the sync with the registry key
-	if key := os.Getenv("REGISTRY_KEY"); key != "" {
-		req.Header.Set("X-Weightless-Key", key)
-	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	status, err := postUsageSync(hubURL, payload, 5*time.Second)
 	if err != nil {
 		log.Printf("Hub sync unreachable (%v), holding %d users in RAM", err, len(payload))
 		return
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Hub sync returned error %d, backing up to SQLite", resp.StatusCode)
+	if status != http.StatusOK {
+		log.Printf("Hub sync returned error %d, backing up to SQLite", status)
 		if err := s.backupUsageToDB(payload); err != nil {
 			log.Printf("Failed to back up usage to SQLite (%v), keeping %d users in RAM", err, len(payload))
 			return
@@ -393,28 +399,12 @@ func (s *SwarmState) DrainBacklog() {
 	}
 
 	// 2. Try to sync to Hub
-	body, err := json.Marshal(payload)
+	status, err := postUsageSync(hubURL, payload, 10*time.Second)
 	if err != nil {
-		log.Printf("DrainBacklog: marshal error: %v", err)
-		return
-	}
-	req, err := http.NewRequest("POST", hubURL+"/api/internal/usage-sync", bytes.NewBuffer(body))
-	if err != nil {
-		log.Printf("DrainBacklog: request creation error: %v", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if key := os.Getenv("REGISTRY_KEY"); key != "" {
-		req.Header.Set("X-Weightless-Key", key)
-	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
+		log.Printf("DrainBacklog: sync error: %v", err)
 		return // network error, try again next cycle
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if status != http.StatusOK {
 		return // non-200, try again next cycle
 	}
 
