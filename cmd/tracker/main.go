@@ -117,7 +117,7 @@ func main() {
 		tracker.State.DrainBacklog()
 	}()
 
-	fmt.Printf("Weightless Tracker %s (%s) live on :%s\n", version, commit, port)
+	fmt.Printf("Weightless Tracker %s (%s) built %s, live on :%s\n", version, commit, date, port)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
