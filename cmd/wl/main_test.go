@@ -400,6 +400,16 @@ func TestTrackerURLWithAnnounce(t *testing.T) {
 	}
 }
 
+func TestTrackerRootHostnameContainingAnnounce(t *testing.T) {
+	// A hostname that merely contains "announce" must not be truncated by a
+	// naive substring search for "/announce".
+	got := trackerRoot("https://announce.example.org/announce")
+	want := "https://announce.example.org"
+	if got != want {
+		t.Errorf("trackerRoot(%q) = %q, want %q", "https://announce.example.org/announce", got, want)
+	}
+}
+
 func TestRegisterBadURL(t *testing.T) {
 	err := registerHash("://bad-url", registryBody{InfoHash: "abc", Name: "Test"}, "")
 	if err == nil {
@@ -712,6 +722,69 @@ func TestGetUsesTrackerFromMagnet(t *testing.T) {
 	}
 	if requestedHash == "" {
 		t.Error("expected tracker from magnet to be used")
+	}
+}
+
+func TestGetPreservesMagnetPasskey(t *testing.T) {
+	// A magnet's tr= param can already carry a signed passkey
+	// (/announce/user.sig). With no --user-id/--secret override, that
+	// passkey must reach the tracker unchanged, not get stripped down to a
+	// bare /announce.
+	pieceData := make([]byte, torrent.MinPieceLength)
+	copy(pieceData, "preserve passkey")
+	path := testFile(t, "test.dat", pieceData)
+
+	result, err := torrent.Create(torrent.CreateOptions{
+		Path: path, Name: "test.dat", PieceLength: torrent.MinPieceLength,
+		AnnounceURL: "http://placeholder/announce",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	peerAddr := startMockPeer(t, result.InfoHashV1[:], pieceData)
+	passkeyPath := "/announce/alice." + strings.Repeat("a", 64)
+
+	var announcedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/registry/torrent" {
+			w.Write(result.TorrentBytes)
+			return
+		}
+		if r.URL.Path == passkeyPath {
+			announcedPath = r.URL.Path
+			host, portStr, _ := net.SplitHostPort(peerAddr)
+			port, _ := strconv.Atoi(portStr)
+			ip := net.ParseIP(host).To4()
+
+			peerBytes := make([]byte, 6)
+			copy(peerBytes[0:4], ip)
+			binary.BigEndian.PutUint16(peerBytes[4:6], uint16(port))
+
+			resp := map[string]interface{}{
+				"interval": 1800,
+				"peers":    string(peerBytes),
+			}
+			data, _ := bencode.EncodeBytes(resp)
+			w.Write(data)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	magnet := "magnet:?xt=urn:btih:" + result.InfoHashV1Hex + "&dn=test.dat&tr=" + server.URL + passkeyPath
+
+	outDir := t.TempDir()
+	err = runGet(getOpts{
+		magnetURI: magnet,
+		outputDir: outDir,
+	})
+	if err != nil {
+		t.Fatalf("runGet failed: %v", err)
+	}
+	if announcedPath != passkeyPath {
+		t.Errorf("announced path = %q, want %q (magnet's passkey should be preserved)", announcedPath, passkeyPath)
 	}
 }
 

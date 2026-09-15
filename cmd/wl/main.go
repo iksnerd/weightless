@@ -178,14 +178,9 @@ func runCreate(opts createOpts) error {
 		return fmt.Errorf("write torrent file: %w", err)
 	}
 
-	// Register with weightless
-	// Registry is ALWAYS at /api/registry relative to the root URL
-	// We extract the root URL by taking everything before /announce
-	rootURL := opts.trackerURL
-	if idx := strings.Index(rootURL, "/announce"); idx != -1 {
-		rootURL = rootURL[:idx]
-	}
-	registryURL := strings.TrimSuffix(rootURL, "/") + "/api/registry"
+	// Register with weightless. Registry is ALWAYS at /api/registry relative
+	// to the tracker root.
+	registryURL := trackerRoot(opts.trackerURL) + "/api/registry"
 
 	regBody := registryBody{
 		InfoHash:    result.InfoHashHex,
@@ -358,14 +353,10 @@ func runGet(opts getOpts) error {
 
 	// Resolve tracker URL: prefer magnet tr param, fall back to --tracker flag
 	trackerBase := opts.trackerURL
+	originalAnnounceURL := ""
 	if len(mag.Trackers) > 0 {
-		// Extract base URL from announce URL
-		tr := mag.Trackers[0]
-		if idx := strings.Index(tr, "/announce"); idx != -1 {
-			trackerBase = tr[:idx]
-		} else {
-			trackerBase = tr
-		}
+		originalAnnounceURL = mag.Trackers[0]
+		trackerBase = trackerRoot(mag.Trackers[0])
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -373,7 +364,18 @@ func runGet(opts getOpts) error {
 
 	// Metadata: try the registry first, then fall back to BEP 9 peer exchange
 	// (so a magnet resolves even when the tracker has no registry entry).
-	announceURL := buildAnnounceURL(trackerBase, opts.userID, opts.secret)
+	// With no replacement credentials, keep the magnet's own announce URL
+	// (and any passkey it already carries) rather than rebuilding a bare
+	// "/announce" that would drop it.
+	var announceURL string
+	switch {
+	case opts.userID != "" && opts.secret != "":
+		announceURL = buildAnnounceURL(trackerBase, opts.userID, opts.secret)
+	case originalAnnounceURL != "":
+		announceURL = originalAnnounceURL
+	default:
+		announceURL = buildAnnounceURL(trackerBase, "", "")
+	}
 	torrentBytes, meta, err := acquireMetadata(ctx, trackerBase, announceURL, mag)
 	if err != nil {
 		return err
@@ -551,9 +553,33 @@ func fetchMetadataFromPeers(ctx context.Context, addrs []string, v1Hash []byte, 
 	return nil, fmt.Errorf("no peer served metadata (%d tried): %w", len(addrs), lastErr)
 }
 
+// trackerRoot strips a trailing "/announce" path segment (and anything after
+// it, such as an existing passkey) plus any trailing slash from a tracker
+// URL, returning the bare root that /announce and /api/registry are both
+// built from. Accepts either a bare root or a full announce URL (e.g. one
+// copied verbatim from a magnet's tr param), so callers can't double up
+// "/announce". Operates on the parsed path only, so a hostname that merely
+// contains "announce" (e.g. announce.example.org) is left untouched.
+func trackerRoot(trackerURL string) string {
+	u, err := url.Parse(trackerURL)
+	if err != nil {
+		return strings.TrimSuffix(trackerURL, "/")
+	}
+	segments := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	for i, seg := range segments {
+		if seg == "announce" {
+			u.Path = "/" + strings.Join(segments[:i], "/")
+			break
+		}
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimSuffix(u.String(), "/")
+}
+
 // buildAnnounceURL constructs the announce URL, optionally with a signed passkey path.
 func buildAnnounceURL(trackerBase, userID, secret string) string {
-	base := strings.TrimSuffix(trackerBase, "/")
+	base := trackerRoot(trackerBase)
 	if userID != "" && secret != "" {
 		passkey := userID + "." + signUserID(userID, secret)
 		return base + "/announce/" + passkey
@@ -570,7 +596,7 @@ func signUserID(userID, secret string) string {
 
 // fetchTorrent downloads the .torrent binary from the tracker registry API.
 func fetchTorrent(trackerBase, infoHash string) ([]byte, error) {
-	u := strings.TrimSuffix(trackerBase, "/") + "/api/registry/torrent?info_hash=" + url.QueryEscape(infoHash)
+	u := trackerRoot(trackerBase) + "/api/registry/torrent?info_hash=" + url.QueryEscape(infoHash)
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Get(u)
