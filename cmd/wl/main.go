@@ -317,6 +317,17 @@ type registryBody struct {
 	TorrentData []byte `json:"torrent_data,omitempty"`
 }
 
+// sanitizeFilename returns name if it is safe to use as a bare filename,
+// otherwise fallback. It rejects (rather than reinterprets) any path
+// separator, NUL, or "."/".." component, since a magnet's dn parameter is
+// attacker-controlled and must not influence where a file is written.
+func sanitizeFilename(name, fallback string) string {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+		return fallback
+	}
+	return name
+}
+
 type getOpts struct {
 	magnetURI  string
 	trackerURL string
@@ -374,8 +385,11 @@ func runGet(opts getOpts) error {
 		outDir = "."
 	}
 
-	// Save .torrent file
-	torrentFile := filepath.Join(outDir, name+".torrent")
+	// Save .torrent file. The magnet's dn is attacker-controlled, so reject
+	// (rather than reinterpret) anything that could escape outDir via
+	// filepath.Join instead of naming the file.
+	safeName := sanitizeFilename(name, hash[:16])
+	torrentFile := filepath.Join(outDir, safeName+".torrent")
 	if err := os.WriteFile(torrentFile, torrentBytes, 0644); err != nil {
 		return fmt.Errorf("write torrent file: %w", err)
 	}
@@ -427,8 +441,14 @@ func runGet(opts getOpts) error {
 // registry has no entry for the hash.
 func acquireMetadata(ctx context.Context, trackerBase, announceURL string, mag torrent.Magnet) ([]byte, torrent.TorrentMeta, error) {
 	if tb, err := fetchTorrent(trackerBase, mag.BestHash()); err == nil {
-		if meta, perr := torrent.Parse(tb); perr == nil {
-			return tb, meta, nil
+		if infoBytes, ierr := torrent.ExtractInfoBytes(tb); ierr == nil {
+			if verr := torrent.VerifyInfoHash(infoBytes, mag); verr == nil {
+				if meta, perr := torrent.Parse(tb); perr == nil {
+					return tb, meta, nil
+				}
+			} else {
+				fmt.Printf("  registry metadata failed hash verification, ignoring: %v\n", verr)
+			}
 		}
 	}
 

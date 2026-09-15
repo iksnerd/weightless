@@ -555,6 +555,104 @@ func TestGetParsesAndFetchesTorrent(t *testing.T) {
 	}
 }
 
+func TestGetRejectsMismatchedRegistryMetadata(t *testing.T) {
+	// The magnet names one torrent's hash...
+	pieceData := make([]byte, torrent.MinPieceLength)
+	copy(pieceData, "the real content")
+	path := testFile(t, "real.dat", pieceData)
+	real, err := torrent.Create(torrent.CreateOptions{
+		Path: path, Name: "real.dat", PieceLength: torrent.MinPieceLength,
+		AnnounceURL: "http://localhost:8080/announce",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ...but the registry serves a different torrent's metadata under that
+	// hash. Accepting it unverified would hand the downloader attacker-chosen
+	// file paths, sizes, and piece hashes.
+	otherData := make([]byte, torrent.MinPieceLength)
+	copy(otherData, "malicious substituted content")
+	otherPath := testFile(t, "evil.dat", otherData)
+	malicious, err := torrent.Create(torrent.CreateOptions{
+		Path: otherPath, Name: "evil.dat", PieceLength: torrent.MinPieceLength,
+		AnnounceURL: "http://localhost:8080/announce",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The mock peer only serves pieces, not BEP 9 metadata, so once the
+	// mismatched registry response is rejected, metadata fallback has nothing
+	// to succeed with — runGet must fail rather than accept the substitution.
+	peerAddr := startMockPeer(t, real.InfoHashV1[:], pieceData)
+	server := torrentServer(t, malicious.TorrentBytes, peerAddr)
+	defer server.Close()
+
+	magnet := "magnet:?xt=urn:btih:" + real.InfoHashV1Hex +
+		"&xt=urn:btmh:1220" + real.InfoHashHex +
+		"&dn=real.dat&tr=" + server.URL + "/announce"
+
+	outDir := t.TempDir()
+	err = runGet(getOpts{
+		magnetURI:  magnet,
+		trackerURL: server.URL,
+		outputDir:  outDir,
+	})
+	if err == nil {
+		t.Fatal("expected runGet to fail when registry metadata does not match the magnet hash")
+	}
+
+	if _, statErr := os.Stat(filepath.Join(outDir, "evil.dat.torrent")); !os.IsNotExist(statErr) {
+		t.Fatal("expected no torrent file to be written from unverified registry metadata")
+	}
+}
+
+func TestGetRejectsPathTraversalDisplayName(t *testing.T) {
+	pieceData := make([]byte, torrent.MinPieceLength)
+	copy(pieceData, "escape attempt")
+	path := testFile(t, "escape.dat", pieceData)
+
+	result, err := torrent.Create(torrent.CreateOptions{
+		Path: path, Name: "escape.dat", PieceLength: torrent.MinPieceLength,
+		AnnounceURL: "http://localhost:8080/announce",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	peerAddr := startMockPeer(t, result.InfoHashV1[:], pieceData)
+	server := torrentServer(t, result.TorrentBytes, peerAddr)
+	defer server.Close()
+
+	// dn tries to write outside outDir via a parent-directory reference.
+	magnet := "magnet:?xt=urn:btih:" + result.InfoHashV1Hex +
+		"&xt=urn:btmh:1220" + result.InfoHashHex +
+		"&dn=../escaped&tr=" + server.URL + "/announce"
+
+	parent := t.TempDir()
+	outDir := filepath.Join(parent, "out")
+	if err := os.Mkdir(outDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	err = runGet(getOpts{
+		magnetURI:  magnet,
+		trackerURL: server.URL,
+		outputDir:  outDir,
+	})
+	if err != nil {
+		t.Fatalf("runGet failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(parent, "escaped.torrent")); !os.IsNotExist(err) {
+		t.Fatalf("expected no file to be written outside outDir, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "escaped.torrent")); !os.IsNotExist(err) {
+		t.Fatalf("expected the traversal name to be rejected, not just contained, got err=%v", err)
+	}
+}
+
 func TestGetUsesTrackerFromMagnet(t *testing.T) {
 	// Create a torrent
 	pieceData := make([]byte, torrent.MinPieceLength)
