@@ -35,7 +35,9 @@ func main() {
 	// Periodically flush memory state to SQLite (every 10s)
 	// and prune stale peers from memory (every 30m)
 	done := make(chan struct{})
+	tickerStopped := make(chan struct{})
 	go func() {
+		defer close(tickerStopped)
 		flushTicker := time.NewTicker(10 * time.Second)
 		pruneTicker := time.NewTicker(30 * time.Minute)
 		defer flushTicker.Stop()
@@ -95,9 +97,14 @@ func main() {
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		<-sigChan
 		log.Println("Shutting down... stopping tickers and flushing final state to DB")
-		// close(done) stops future ticks; a tick already mid-flush may overlap the
-		// final flush below, which SQLite's busy_timeout tolerates.
+		// Wait for the periodic goroutine to fully exit before running the final
+		// flush below. Without this, a tick already mid-flush when done closes
+		// could still be sending FlushUsers' Hub usage-sync POST when the final
+		// flush starts its own; FlushUsers releases its lock before the HTTP
+		// call, so both would snapshot and report the same usage delta to the
+		// Hub before either subtracts it, double-reporting it upstream.
 		close(done)
+		<-tickerStopped
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		// Stop accepting new announces first so the final flush captures all state,
