@@ -84,7 +84,7 @@ func DownloadMVP(ctx context.Context, opts DownloadOptions) error {
 	stopped.Event = EventStopped
 
 	if len(addrs) == 0 {
-		bestEffortAnnounce(announceURL, stopped)
+		BestEffortAnnounce(announceURL, stopped)
 		return fmt.Errorf("no peers found")
 	}
 	log.Printf("Found %d peers.", len(addrs))
@@ -96,7 +96,7 @@ func DownloadMVP(ctx context.Context, opts DownloadOptions) error {
 	}
 	swarm := NewSwarm(meta, maxWorkers)
 	if err := swarm.Start(ctx, addrs, meta.InfoHashV1, peerID, store); err != nil {
-		bestEffortAnnounce(announceURL, stopped)
+		BestEffortAnnounce(announceURL, stopped)
 		return fmt.Errorf("swarm download: %w", err)
 	}
 
@@ -107,19 +107,19 @@ func DownloadMVP(ctx context.Context, opts DownloadOptions) error {
 	completed.Event = EventCompleted
 	completed.Downloaded = meta.TotalSize
 	completed.Left = 0
-	bestEffortAnnounce(announceURL, completed)
+	BestEffortAnnounce(announceURL, completed)
 	stopped.Downloaded = meta.TotalSize
 	stopped.Left = 0
-	bestEffortAnnounce(announceURL, stopped)
+	BestEffortAnnounce(announceURL, stopped)
 
 	fmt.Printf("\nSuccess! Downloaded %s to %s\n", meta.Name, opts.OutputDir)
 	return nil
 }
 
-// bestEffortAnnounce sends a lifecycle announce (completed/stopped) that must
-// never fail the download. It runs on its own short-lived background context
-// so it still fires when the caller's ctx has already been cancelled.
-func bestEffortAnnounce(announceURL string, opts AnnounceOptions) {
+// BestEffortAnnounce sends a lifecycle announce (completed/stopped) that must
+// never fail the caller. It runs on its own short-lived background context so
+// it still fires when the caller's ctx has already been cancelled.
+func BestEffortAnnounce(announceURL string, opts AnnounceOptions) {
 	ctx, cancel := context.WithTimeout(context.Background(), announceGrace)
 	defer cancel()
 	if _, err := Announce(ctx, announceURL, opts); err != nil {

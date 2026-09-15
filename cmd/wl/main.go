@@ -395,6 +395,9 @@ func runGet(opts getOpts) error {
 	// "follow an existing symlink and truncate its target".
 	safeName := sanitizeFilename(name, hash[:16])
 	torrentFile := filepath.Join(outDir, safeName+".torrent")
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return fmt.Errorf("create output directory %s: %w", outDir, err)
+	}
 	outRoot, err := os.OpenRoot(outDir)
 	if err != nil {
 		return fmt.Errorf("open output directory %s: %w", outDir, err)
@@ -482,15 +485,23 @@ func acquireMetadata(ctx context.Context, trackerBase, announceURL string, mag t
 	}
 
 	peerID := client.GeneratePeerID()
-	addrs, err := client.Announce(ctx, announceURL, client.AnnounceOptions{
+	announceBase := client.AnnounceOptions{
 		InfoHash: string(v1Hash),
 		PeerID:   peerID,
 		Port:     6881,
-		Event:    client.EventStarted,
-	})
+	}
+	started := announceBase
+	started.Event = client.EventStarted
+	addrs, err := client.Announce(ctx, announceURL, started)
 	if err != nil {
 		return nil, torrent.TorrentMeta{}, fmt.Errorf("announce for peers: %w", err)
 	}
+	// From here on we're registered in the swarm under peerID: every exit path
+	// must tell the tracker we left, or this metadata-only fetch lingers as a
+	// phantom seeder until the tracker prunes it.
+	stopped := announceBase
+	stopped.Event = client.EventStopped
+	defer client.BestEffortAnnounce(announceURL, stopped)
 	if len(addrs) == 0 {
 		return nil, torrent.TorrentMeta{}, fmt.Errorf("no peers available to fetch metadata from")
 	}
