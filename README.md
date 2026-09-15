@@ -80,7 +80,7 @@ See [docs/API_SPEC.md](docs/API_SPEC.md) for full request/response documentation
 
 ## `wl` CLI
 
-The `wl` CLI creates and downloads torrents. `wl create` registers data with the tracker; `wl get` downloads it from the P2P swarm.
+The `wl` CLI creates and downloads torrents. `wl create` registers data with the tracker; `wl get` downloads it from the P2P swarm; `wl version` prints the build version.
 
 ### Install
 
@@ -121,7 +121,13 @@ Flags:
   --license       License (e.g. MIT, CC-BY-4.0)
   --category      Category (e.g. models, datasets)
   --tags          Comma-separated tags
+  --comment       Optional comment stored in the torrent file
+  --stream        Torrentify a remote http(s) URL without downloading it
+                  (carried as a BEP 19 web seed); mutually exclusive with <path>
+  --webseed       BEP 19 web seed URL, repeatable
 ```
+
+See [docs/CLI_SPEC.md](docs/CLI_SPEC.md) for the full flag reference, `--stream` mode, and `wl version`.
 
 ```bash
 # Single file
@@ -177,6 +183,7 @@ Resolves the magnet link, fetches metadata from the tracker (fast path), then do
 | `REGISTRY_KEY` | _(unset)_ | If set, POST and DELETE on `/api/registry` require the `X-Weightless-Key` header. Read per request, so `.env.local` works. |
 | `TRACKER_SECRET` | _(unset)_ | If set, enables HMAC-SHA256 passkey auth on `/announce` |
 | `OPEN_TRACKER` | `false` | If `true`, accepts announces for any info_hash (disables registry-only check) |
+| `HUB_URL` | _(unset)_ | If set, periodically syncs per-user upload/download deltas to this URL (see [USAGE_SYNC_SPEC.md](docs/USAGE_SYNC_SPEC.md)). Unset means usage deltas accumulate in RAM only. |
 | `GCS_ACCESS_KEY` | — | Litestream GCS credentials |
 | `GCS_SECRET_KEY` | — | Litestream GCS credentials |
 | `BACKUP_BUCKET` | — | GCS bucket for Litestream replicas |

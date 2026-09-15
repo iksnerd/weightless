@@ -2,13 +2,19 @@
 
 A single Go binary that creates and downloads hybrid BitTorrent v1+v2 torrents, with built-in tracker registration and passkey authentication.
 
+```bash
+wl version   # prints the build version, commit, and date (set via -ldflags)
+```
+
 ## `wl create` — Register data
 
 ```
 wl create [flags] <path>
+wl create [flags] --stream <http(s)-url>
 
 Flags:
-  --name          Display name for the torrent (default: basename of path).
+  --name          Display name for the torrent (default: basename of path,
+                  or of the stream URL's path when using --stream).
                   For single-file torrents, info.name in the torrent is always
                   the actual filename — --name affects the registry label,
                   magnet URI dn= param, and output .torrent filename only.
@@ -24,6 +30,13 @@ Flags:
   --license       License identifier (e.g. MIT, Apache-2.0)
   --category      Registry category (e.g. models, datasets)
   --tags          Comma-separated tags
+  --comment       Optional comment stored in the torrent file
+  --stream        Torrentify a remote http(s) URL without downloading it to
+                  disk — streams the body once to hash it, then carries the
+                  origin URL as a BEP 19 web seed. Requires the origin to
+                  report Content-Length. Mutually exclusive with <path>.
+  --webseed       BEP 19 web seed URL (HTTP origin fallback); repeatable.
+                  With --stream, the streamed URL is added automatically.
 ```
 
 ## Examples
@@ -40,6 +53,13 @@ wl create --name "ImageNet" \
   --category "datasets" \
   --tags "vision,benchmark" \
   ./imagenet-val/
+
+# Torrentify a remote file without downloading it locally — the origin
+# serves as a web seed until enough peers seed it directly
+wl create --stream "https://example.com/dataset.tar" --name "Example-Dataset"
+
+# Add extra web seed fallbacks to a local build
+wl create --name "My-Dataset" --webseed "https://mirror1.example.com/data.tar" ./data.tar
 ```
 
 ## What it Does
@@ -105,6 +125,7 @@ Metadata is untrusted whether it comes from the registry or from a peer over BEP
 - File paths are rejected if any component is empty, `.`, `..`, absolute, or contains a path separator or NUL. Storage independently refuses to write outside `--output`.
 - The v1 `pieces` string must be a whole number of 20-byte hashes and match the piece count implied by the total size. v2-only torrents (no v1 `pieces`) are refused; the downloader verifies against SHA-1 pieces only.
 - Bencode is structurally validated (size, depth, list/dict length) before decoding.
+- The magnet's `dn` (display name) is attacker-controlled too: it names the output `.torrent` file, so it's rejected outright (falling back to the info hash) if it contains a path separator, NUL, or a bare `.`/`..`, rather than reinterpreted. The `.torrent` file itself is written through an `os.Root` rooted at `--output`, so a pre-existing symlink planted at the target path can't redirect the write outside `--output`. The output directory is created first if it doesn't exist.
 
 ### P2P Features
 
