@@ -1,6 +1,9 @@
 package torrent
 
 import (
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -77,6 +80,9 @@ func parseInfoMap(info map[string]interface{}) (TorrentMeta, error) {
 		meta.Name = v
 	}
 	if v, ok := info["piece length"].(int64); ok {
+		if v <= 0 {
+			return TorrentMeta{}, fmt.Errorf("piece length %d must be positive", v)
+		}
 		meta.PieceLength = int(v)
 	}
 	if v, ok := info["pieces"].(string); ok {
@@ -156,6 +162,46 @@ func parseInfoMap(info map[string]interface{}) (TorrentMeta, error) {
 	}
 
 	return meta, nil
+}
+
+// ExtractInfoBytes returns the exact bencoded "info" dict bytes from a full
+// .torrent metainfo. The v1/v2 info hash is defined over these raw encoded
+// bytes, not over a re-encoding of the decoded fields, so callers verifying
+// a hash must hash exactly what this returns.
+func ExtractInfoBytes(data []byte) ([]byte, error) {
+	if err := wbencode.Validate(data, wbencode.TorrentLimits); err != nil {
+		return nil, fmt.Errorf("torrent validate: %w", err)
+	}
+	var raw map[string]bencode.RawMessage
+	if err := bencode.DecodeBytes(data, &raw); err != nil {
+		return nil, fmt.Errorf("bencode decode: %w", err)
+	}
+	info, ok := raw["info"]
+	if !ok {
+		return nil, fmt.Errorf("missing info dict")
+	}
+	return []byte(info), nil
+}
+
+// VerifyInfoHash checks that infoBytes (the raw bencoded info dict, as
+// returned by ExtractInfoBytes) hashes to the info hash(es) named in mag.
+// ParseMagnet guarantees at least one of InfoHashV1/InfoHashV2 is set; when
+// a hybrid magnet carries both, both must match since they name the same
+// info dict under two algorithms.
+func VerifyInfoHash(infoBytes []byte, mag Magnet) error {
+	if mag.InfoHashV1 != "" {
+		got := sha1.Sum(infoBytes)
+		if hex.EncodeToString(got[:]) != mag.InfoHashV1 {
+			return fmt.Errorf("v1 info hash mismatch: got %s, magnet wants %s", hex.EncodeToString(got[:]), mag.InfoHashV1)
+		}
+	}
+	if mag.InfoHashV2 != "" {
+		got := sha256.Sum256(infoBytes)
+		if hex.EncodeToString(got[:]) != mag.InfoHashV2 {
+			return fmt.Errorf("v2 info hash mismatch: got %s, magnet wants %s", hex.EncodeToString(got[:]), mag.InfoHashV2)
+		}
+	}
+	return nil
 }
 
 // safeJoin joins torrent-supplied path components into a relative path,

@@ -286,13 +286,33 @@ func (p *PeerConn) sendExtendedHandshake() error {
 // ReadMessage reads the next message from the peer. Requires the BEP 3
 // handshake to have completed — until then, raw bytes on the wire don't
 // frame as PWP messages.
-func (p *PeerConn) ReadMessage() (*Message, error) {
+//
+// The read carries its own 2-minute steady-state timeout, but a silent peer
+// would otherwise block for the full timeout even after ctx is cancelled
+// (Ctrl+C, another piece failing, download completing). A watcher goroutine
+// pulls the read deadline forward to "now" the moment ctx is done, so a
+// blocked Read returns immediately instead of holding the worker hostage.
+func (p *PeerConn) ReadMessage(ctx context.Context) (*Message, error) {
 	if p.state < stateHandshook {
 		return nil, fmt.Errorf("ReadMessage called in state %d (expected handshook)", p.state)
 	}
-	// Set a reasonable read timeout to avoid hanging forever
 	p.conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
-	return ReadMessage(p.conn)
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			p.conn.SetReadDeadline(time.Now())
+		case <-done:
+		}
+	}()
+
+	msg, err := ReadMessage(p.conn)
+	if err != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return msg, err
 }
 
 // WriteMessage writes a message to the peer. Requires the BEP 3 handshake

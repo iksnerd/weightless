@@ -1,6 +1,7 @@
 package torrent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -390,6 +391,97 @@ func TestParsePiecesConsistency(t *testing.T) {
 		}
 		if meta.PieceCount != 2 {
 			t.Errorf("piece count = %d, want 2", meta.PieceCount)
+		}
+	})
+}
+
+func TestParseRejectsNonPositivePieceLength(t *testing.T) {
+	for _, length := range []int64{-1, 0} {
+		t.Run(fmt.Sprintf("length %d", length), func(t *testing.T) {
+			info := map[string]interface{}{
+				"name": "f", "piece length": length, "length": int64(4),
+			}
+			_, err := Parse(encodeInfoTorrent(t, info))
+			if err == nil || !strings.Contains(err.Error(), "must be positive") {
+				t.Fatalf("expected 'must be positive' error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestVerifyInfoHash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "verify_hash")
+	if err := os.WriteFile(path, []byte("verify hash content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Create(CreateOptions{
+		Path:        path,
+		Name:        "verify_hash",
+		PieceLength: MinPieceLength,
+		AnnounceURL: "http://localhost:8080/announce",
+	})
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	infoBytes, err := ExtractInfoBytes(result.TorrentBytes)
+	if err != nil {
+		t.Fatalf("ExtractInfoBytes failed: %v", err)
+	}
+
+	t.Run("matching hybrid magnet verifies", func(t *testing.T) {
+		mag := Magnet{InfoHashV1: result.InfoHashV1Hex, InfoHashV2: result.InfoHashHex}
+		if err := VerifyInfoHash(infoBytes, mag); err != nil {
+			t.Errorf("expected verification to pass, got %v", err)
+		}
+	})
+
+	t.Run("v1-only magnet ignores v2", func(t *testing.T) {
+		mag := Magnet{InfoHashV1: result.InfoHashV1Hex}
+		if err := VerifyInfoHash(infoBytes, mag); err != nil {
+			t.Errorf("expected verification to pass, got %v", err)
+		}
+	})
+
+	t.Run("wrong v1 hash rejected", func(t *testing.T) {
+		mag := Magnet{InfoHashV1: strings.Repeat("a", 40)}
+		if err := VerifyInfoHash(infoBytes, mag); err == nil {
+			t.Error("expected verification to fail on v1 mismatch")
+		}
+	})
+
+	t.Run("wrong v2 hash rejected even when v1 matches", func(t *testing.T) {
+		mag := Magnet{InfoHashV1: result.InfoHashV1Hex, InfoHashV2: strings.Repeat("b", 64)}
+		if err := VerifyInfoHash(infoBytes, mag); err == nil {
+			t.Error("expected verification to fail on v2 mismatch")
+		}
+	})
+
+	t.Run("substituted metadata rejected", func(t *testing.T) {
+		other := filepath.Join(dir, "other")
+		if err := os.WriteFile(other, []byte("different content entirely"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		otherResult, err := Create(CreateOptions{
+			Path:        other,
+			Name:        "other",
+			PieceLength: MinPieceLength,
+			AnnounceURL: "http://localhost:8080/announce",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		otherInfoBytes, err := ExtractInfoBytes(otherResult.TorrentBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// The magnet names the first torrent's hash but infoBytes here is the
+		// second torrent's metadata (path/size/piece-hash substitution).
+		mag := Magnet{InfoHashV1: result.InfoHashV1Hex, InfoHashV2: result.InfoHashHex}
+		if err := VerifyInfoHash(otherInfoBytes, mag); err == nil {
+			t.Error("expected substituted metadata to fail verification")
 		}
 	})
 }

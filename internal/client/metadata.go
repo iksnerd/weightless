@@ -44,7 +44,7 @@ func (p *PeerConn) FetchMetadata(ctx context.Context, infoHash []byte) ([]byte, 
 			return nil, err
 		}
 
-		msg, err := p.readMetadataReply()
+		msg, err := p.readMetadataReply(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("metadata piece %d: %w", i, err)
 		}
@@ -113,9 +113,9 @@ func (p *PeerConn) FetchMetadata(ctx context.Context, infoHash []byte) ([]byte, 
 // extension ID arrives. Keep-alives and ordinary PWP messages are skipped;
 // extended messages for other extensions are skipped too, except ut_pex,
 // which is routed to handlePexMessage so discovered peers aren't lost.
-func (p *PeerConn) readMetadataReply() (*Message, error) {
+func (p *PeerConn) readMetadataReply(ctx context.Context) (*Message, error) {
 	for n := 0; n < maxMetadataSkipMsgs; n++ {
-		msg, err := p.ReadMessage()
+		msg, err := p.ReadMessage(ctx)
 		if err != nil {
 			return nil, err
 		}

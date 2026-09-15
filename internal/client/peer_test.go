@@ -217,11 +217,42 @@ func TestReadMessageBeforeHandshakeRejected(t *testing.T) {
 
 	p := &PeerConn{conn: client, state: stateInit}
 
-	if _, err := p.ReadMessage(); err == nil {
+	if _, err := p.ReadMessage(context.Background()); err == nil {
 		t.Error("ReadMessage in stateInit should fail")
 	}
 	if err := p.WriteMessage(&Message{ID: 0}); err == nil {
 		t.Error("WriteMessage in stateInit should fail")
+	}
+}
+
+func TestReadMessageInterruptedByCancellation(t *testing.T) {
+	// A peer that never sends anything would otherwise hold ReadMessage for
+	// its full 2-minute steady-state timeout. Cancelling ctx must unblock it
+	// immediately instead.
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	p := &PeerConn{conn: client, state: stateHandshook}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := p.ReadMessage(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected ReadMessage to return an error on cancellation")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("ReadMessage took %v to return after cancellation, expected near-immediate", elapsed)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("expected ctx to be cancelled")
 	}
 }
 
