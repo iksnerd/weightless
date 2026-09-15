@@ -244,6 +244,39 @@ func TestFlushUsersResilience(t *testing.T) {
 	}
 }
 
+func TestFlushUsersKeepsUsageInRAMWhenBackupFails(t *testing.T) {
+	DB = SetupTestDB(t)
+	defer DB.Close()
+
+	// Hub is down for this flush.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Busy", http.StatusServiceUnavailable)
+	}))
+	defer ts.Close()
+	t.Setenv("HUB_URL", ts.URL)
+
+	State.mu.Lock()
+	State.Users = make(map[string]*UserUsage)
+	State.Users["u1"] = &UserUsage{Uploaded: 1000, Downloaded: 500}
+	State.mu.Unlock()
+
+	// The SQLite backup also fails (DB closed out from under it), so the
+	// usage delta must not be dropped from RAM despite being unsent.
+	DB.Close()
+
+	State.FlushUsers()
+
+	State.mu.RLock()
+	u := State.Users["u1"]
+	State.mu.RUnlock()
+	if u == nil {
+		t.Fatal("usage was cleared from RAM even though neither the Hub sync nor the SQLite backup succeeded")
+	}
+	if u.Uploaded != 1000 || u.Downloaded != 500 {
+		t.Errorf("expected undelivered usage 1000/500 to remain, got %d/%d", u.Uploaded, u.Downloaded)
+	}
+}
+
 func TestFlushUsersPreservesInFlightDeltas(t *testing.T) {
 	DB = SetupTestDB(t)
 	defer DB.Close()

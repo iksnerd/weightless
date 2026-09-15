@@ -299,7 +299,10 @@ func (s *SwarmState) FlushUsers() {
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Hub sync returned error %d, backing up to SQLite", resp.StatusCode)
-		s.backupUsageToDB(payload)
+		if err := s.backupUsageToDB(payload); err != nil {
+			log.Printf("Failed to back up usage to SQLite (%v), keeping %d users in RAM", err, len(payload))
+			return
+		}
 	} else {
 		log.Printf("Successfully synced usage for %d users to Hub", len(payload))
 	}
@@ -321,32 +324,33 @@ func (s *SwarmState) FlushUsers() {
 	s.mu.Unlock()
 }
 
-// backupUsageToDB saves usage deltas to the local SQLite backlog for later draining.
-func (s *SwarmState) backupUsageToDB(usage map[string]UserUsage) {
+// backupUsageToDB saves usage deltas to the local SQLite backlog for later
+// draining. Returns an error if any row failed to persist, so the caller
+// knows the usage was not durably recorded and must not be cleared from RAM.
+func (s *SwarmState) backupUsageToDB(usage map[string]UserUsage) error {
 	tx, err := DB.Begin()
 	if err != nil {
-		log.Printf("Failed to start backlog tx: %v", err)
-		return
+		return fmt.Errorf("start backlog tx: %w", err)
 	}
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare("INSERT INTO usage_backlog (user_id, uploaded, downloaded, created_at) VALUES (?, ?, ?, ?)")
 	if err != nil {
-		log.Printf("Failed to prepare backlog stmt: %v", err)
-		return
+		return fmt.Errorf("prepare backlog stmt: %w", err)
 	}
 	defer stmt.Close()
 
 	now := time.Now().Unix()
 	for id, u := range usage {
 		if _, err := stmt.Exec(id, u.Uploaded, u.Downloaded, now); err != nil {
-			log.Printf("Failed to exec backlog insert: %v", err)
+			return fmt.Errorf("insert backlog row for %s: %w", id, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		log.Printf("Failed to commit usage backlog: %v", err)
+		return fmt.Errorf("commit usage backlog: %w", err)
 	}
+	return nil
 }
 
 // DrainBacklog attempts to sync the SQLite usage backlog to the external Hub.
