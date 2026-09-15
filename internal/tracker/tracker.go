@@ -59,6 +59,9 @@ func loadEnv() {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("WARNING: error reading %s: %v", found, err)
+	}
 	log.Printf("Loaded %d variables from %s", count, found)
 }
 
