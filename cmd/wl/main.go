@@ -430,12 +430,6 @@ func runGet(opts getOpts) error {
 		}
 	}
 
-	// Invoke Stage C Downloader
-	clientFiles := make([]client.FileEntry, len(meta.Files))
-	for i, f := range meta.Files {
-		clientFiles[i] = client.FileEntry{Path: f.Path, Length: f.Length}
-	}
-
 	// A v2-only magnet has no v1 hash, which is fine; but if one is present it
 	// must be valid hex — reject a malformed value at the boundary rather than
 	// handing a truncated hash to the downloader.
@@ -446,13 +440,8 @@ func runGet(opts getOpts) error {
 
 	return client.DownloadMVP(ctx, client.DownloadOptions{
 		Meta: client.TorrentMeta{
-			Name:        meta.Name,
+			TorrentMeta: meta,
 			InfoHashV1:  v1Hash,
-			PieceLength: meta.PieceLength,
-			PieceCount:  meta.PieceCount,
-			TotalSize:   meta.TotalSize,
-			Pieces:      meta.Pieces,
-			Files:       clientFiles,
 		},
 		TrackerURL: announceURL,
 		OutputDir:  outDir,
@@ -466,7 +455,7 @@ func acquireMetadata(ctx context.Context, trackerBase, announceURL string, mag t
 	if tb, err := fetchTorrent(trackerBase, mag.BestHash()); err == nil {
 		if infoBytes, ierr := torrent.ExtractInfoBytes(tb); ierr == nil {
 			if verr := torrent.VerifyInfoHash(infoBytes, mag); verr == nil {
-				if meta, perr := torrent.Parse(tb); perr == nil {
+				if meta, perr := torrent.ParseInfo(infoBytes); perr == nil {
 					return tb, meta, nil
 				}
 			} else {

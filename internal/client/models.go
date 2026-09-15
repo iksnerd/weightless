@@ -1,18 +1,15 @@
 package client
 
-// TorrentMeta holds the metadata needed for downloading.
-// This matches the structure in cmd/wl/main.go but is exported for package boundary use.
-type TorrentMeta struct {
-	Name        string
-	InfoHashV1  []byte
-	PieceLength int
-	PieceCount  int
-	TotalSize   int64
-	Pieces      []byte // Concatenated SHA-1 hashes
-	Files       []FileEntry
-}
+import "weightless/internal/torrent"
 
-type FileEntry struct {
-	Path   string
-	Length int64
+// FileEntry aliases the shared torrent metadata type, so the client, the
+// torrent parser, and the CLI all describe a file the same way.
+type FileEntry = torrent.FileEntry
+
+// TorrentMeta holds the metadata needed for downloading. It embeds the parsed
+// torrent metadata and adds the v1 info hash, which the client needs for
+// announces and peer handshakes but which isn't a field of a parsed info dict.
+type TorrentMeta struct {
+	torrent.TorrentMeta
+	InfoHashV1 []byte
 }

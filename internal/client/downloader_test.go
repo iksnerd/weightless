@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/zeebo/bencode"
+
+	"weightless/internal/torrent"
 )
 
 // A torrent whose piece-hash string doesn't cover every piece must be
@@ -41,13 +43,15 @@ func TestDownloadMVPRejectsBadPieceHashes(t *testing.T) {
 
 			err := DownloadMVP(context.Background(), DownloadOptions{
 				Meta: TorrentMeta{
-					Name:        "bad",
-					InfoHashV1:  make([]byte, 20),
-					PieceLength: 16,
-					PieceCount:  2,
-					TotalSize:   24,
-					Pieces:      tt.pieces,
-					Files:       []FileEntry{{Path: "bad.dat", Length: 24}},
+					TorrentMeta: torrent.TorrentMeta{
+						Name:        "bad",
+						PieceLength: 16,
+						PieceCount:  2,
+						TotalSize:   24,
+						Pieces:      tt.pieces,
+						Files:       []FileEntry{{Path: "bad.dat", Length: 24}},
+					},
+					InfoHashV1: make([]byte, 20),
 				},
 				TrackerURL: tracker.URL,
 				OutputDir:  t.TempDir(),

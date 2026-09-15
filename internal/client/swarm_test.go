@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"weightless/internal/torrent"
 )
 
 func TestSwarmShutdownNoLeak(t *testing.T) {
@@ -32,13 +34,15 @@ func TestSwarmShutdownNoLeak(t *testing.T) {
 	copy(infoHash, "testhash1234567890ab")
 
 	meta := TorrentMeta{
-		Name:        "test",
-		InfoHashV1:  infoHash,
-		PieceLength: 16,
-		PieceCount:  2,
-		TotalSize:   24,
-		Pieces:      pieces,
-		Files:       []FileEntry{{Path: "test.dat", Length: 24}},
+		TorrentMeta: torrent.TorrentMeta{
+			Name:        "test",
+			PieceLength: 16,
+			PieceCount:  2,
+			TotalSize:   24,
+			Pieces:      pieces,
+			Files:       []FileEntry{{Path: "test.dat", Length: 24}},
+		},
+		InfoHashV1: infoHash,
 	}
 
 	// Start a mock peer that serves the data
@@ -109,13 +113,15 @@ func twoPieceFixture(t *testing.T) (TorrentMeta, []byte, []byte, *Storage) {
 	copy(infoHash, "testhash1234567890ab")
 
 	meta := TorrentMeta{
-		Name:        "test",
-		InfoHashV1:  infoHash,
-		PieceLength: 16,
-		PieceCount:  2,
-		TotalSize:   24,
-		Pieces:      pieces,
-		Files:       []FileEntry{{Path: "test.dat", Length: 24}},
+		TorrentMeta: torrent.TorrentMeta{
+			Name:        "test",
+			PieceLength: 16,
+			PieceCount:  2,
+			TotalSize:   24,
+			Pieces:      pieces,
+			Files:       []FileEntry{{Path: "test.dat", Length: 24}},
+		},
+		InfoHashV1: infoHash,
 	}
 	store := newTestStorage(t, t.TempDir(), meta.Files)
 	store.Preallocate()
