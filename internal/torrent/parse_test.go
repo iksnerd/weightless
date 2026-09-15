@@ -409,6 +409,26 @@ func TestParseRejectsNonPositivePieceLength(t *testing.T) {
 	}
 }
 
+func TestParseRejectsMissingOrWrongTypePieceLength(t *testing.T) {
+	pieces := strings.Repeat("\x00", 20)
+	cases := map[string]map[string]interface{}{
+		"missing": {
+			"name": "f", "length": int64(1), "pieces": pieces,
+		},
+		"string instead of int": {
+			"name": "f", "piece length": "16384", "length": int64(1), "pieces": pieces,
+		},
+	}
+	for name, info := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse(encodeInfoTorrent(t, info))
+			if err == nil || !strings.Contains(err.Error(), "piece length") {
+				t.Fatalf("expected piece length error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestVerifyInfoHash(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "verify_hash")

@@ -79,12 +79,14 @@ func parseInfoMap(info map[string]interface{}) (TorrentMeta, error) {
 	if v, ok := info["name"].(string); ok {
 		meta.Name = v
 	}
-	if v, ok := info["piece length"].(int64); ok {
-		if v <= 0 {
-			return TorrentMeta{}, fmt.Errorf("piece length %d must be positive", v)
-		}
-		meta.PieceLength = int(v)
+	v, ok := info["piece length"].(int64)
+	if !ok {
+		return TorrentMeta{}, fmt.Errorf("piece length missing or not an integer")
 	}
+	if v <= 0 {
+		return TorrentMeta{}, fmt.Errorf("piece length %d must be positive", v)
+	}
+	meta.PieceLength = int(v)
 	if v, ok := info["pieces"].(string); ok {
 		if len(v)%20 != 0 {
 			return TorrentMeta{}, fmt.Errorf("pieces length not a multiple of 20")
